@@ -1,0 +1,172 @@
+ <!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NoteZ - Ayarlar</title>
+  <link rel="stylesheet" href="styles/variables.css">
+  <link rel="stylesheet" href="styles/settings.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>NoteZ - Popup Reminder System</h1>
+      <p>Ayarlar Paneli</p>
+    </header>
+    
+    <main>
+      <section class="settings-section">
+        <h2>Kategoriler</h2>
+        <div id="categories-list">
+          <p>Kategoriler yükleniyor...</p>
+        </div>
+        <button id="add-category-btn">Kategori Ekle</button>
+        
+        <!-- Category Form Modal -->
+        <div id="category-modal" class="modal">
+          <div class="modal-content">
+            <h3 id="category-modal-title">Kategori Ekle</h3>
+            <form id="category-form">
+              <input type="hidden" id="category-id">
+              <div class="form-group">
+                <label for="category-name">Kategori Adı</label>
+                <input type="text" id="category-name" required>
+              </div>
+              <div class="form-group">
+                <label for="category-color">Renk</label>
+                <input type="color" id="category-color" value="#6C63FF">
+              </div>
+              <div class="form-group">
+                <label for="category-triggers">Trigger Keyword'leri (virgülle ayrın)</label>
+                <input type="text" id="category-triggers" placeholder="Claude, ChatGPT, Gemini">
+              </div>
+              <div class="form-actions">
+                <button type="button" class="btn-secondary" id="cancel-category-btn">İptal</button>
+                <button type="submit">Kaydet</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </section>
+      
+      <section class="settings-section">
+        <h2>Tipler</h2>
+        <div id="tips-list">
+          <p>Tipler yükleniyor...</p>
+        </div>
+        <button id="add-tip-btn">Tip Ekle</button>
+        
+        <!-- Tip Form Modal -->
+        <div id="tip-modal" class="modal">
+          <div class="modal-content">
+            <h3 id="tip-modal-title">Tip Ekle</h3>
+            <form id="tip-form">
+              <input type="hidden" id="tip-id">
+              <div class="form-group">
+                <label for="tip-category">Kategori</label>
+                <select id="tip-category" required>
+                  <option value="">Kategori Seçin</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="tip-content">İçerik</label>
+                <textarea id="tip-content" rows="4" required></textarea>
+              </div>
+              <div class="form-group">
+                <label for="tip-importance">Önem (1-10)</label>
+                <input type="number" id="tip-importance" min="1" max="10" value="5" required>
+              </div>
+              <div class="form-group">
+                <label for="tip-status">Durum</label>
+                <select id="tip-status">
+                  <option value="active">Aktif</option>
+                  <option value="retired">Emekli</option>
+                  <option value="done">Tamamlandı</option>
+                </select>
+              </div>
+              <div class="form-actions">
+                <button type="button" class="btn-secondary" id="cancel-tip-btn">İptal</button>
+                <button type="submit">Kaydet</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </section>
+      
+      <section class="settings-section">
+        <h2>Sesler</h2>
+        <div class="form-group">
+          <label for="audio-volume">Ana Ses Seviyesi (0-100)</label>
+          <input type="range" id="audio-volume" min="0" max="100" value="50">
+          <span id="volume-value">50%</span>
+        </div>
+        <div class="form-group">
+          <label for="background-music">Arka Plan Müzik Dosyası</label>
+          <input type="text" id="background-music" placeholder="Dosya yolu (örn: C:/Music/background.mp3)">
+        </div>
+        <div class="form-group">
+          <label for="sound-level-1-3">Seviye 1-3 Ses Efekti</label>
+          <input type="text" id="sound-level-1-3" placeholder="Dosya yolu">
+        </div>
+        <div class="form-group">
+          <label for="sound-level-4-6">Seviye 4-6 Ses Efekti</label>
+          <input type="text" id="sound-level-4-6" placeholder="Dosya yolu">
+        </div>
+        <div class="form-group">
+          <label for="sound-level-7-9">Seviye 7-9 Ses Efekti</label>
+          <input type="text" id="sound-level-7-9" placeholder="Dosya yolu">
+        </div>
+        <div class="form-group">
+          <label for="sound-level-10">Seviye 10 Ses Efekti</label>
+          <input type="text" id="sound-level-10" placeholder="Dosya yolu">
+        </div>
+        <div class="form-group">
+          <label for="sound-level-10-buildup">Seviye 10 Build-up Ses Efekti</label>
+          <input type="text" id="sound-level-10-buildup" placeholder="Dosya yolu">
+        </div>
+        <div class="form-group">
+          <label for="sound-level-10-hit">Seviye 10 Hit Ses Efekti</label>
+          <input type="text" id="sound-level-10-hit" placeholder="Dosya yolu">
+        </div>
+        <div class="form-actions">
+          <button id="save-audio-settings">Ses Ayarlarını Kaydet</button>
+        </div>
+      </section>
+      
+      <section class="settings-section">
+        <h2>İstatistikler</h2>
+        
+        <!-- Pattern Warnings -->
+        <div id="pattern-warnings" class="pattern-warnings">
+          <h3>Önemli Desenler</h3>
+          <div id="pattern-warnings-list">
+            <p>Veri yükleniyor...</p>
+          </div>
+        </div>
+        
+        <!-- Category Statistics -->
+        <div class="stats-container">
+          <h3>Kategori Bazlı İstatistikler</h3>
+          <div id="category-stats">
+            <p>Veri yükleniyor...</p>
+          </div>
+        </div>
+        
+        <!-- Tip Statistics -->
+        <div class="stats-container">
+          <h3>Tip Bazlı İstatistikler</h3>
+          <div id="tip-stats">
+            <p>Veri yükleniyor...</p>
+          </div>
+        </div>
+        
+        <button id="refresh-stats">İstatistikleri Yenile</button>
+      </section>
+    </main>
+  </div>
+  
+  <script src="js/analytics.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/settings.js"></script>
+</body>
+</html>

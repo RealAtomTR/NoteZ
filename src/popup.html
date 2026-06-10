@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NoteZ - Popup</title>
+  <link rel="stylesheet" href="styles/variables.css">
+  <link rel="stylesheet" href="styles/popup.css">
+</head>
+<body>
+  <div class="popup-container" id="popup-container">
+    <div class="popup-header">
+      <span class="category-name" id="category-name">Kategori</span>
+      <span class="category-color" id="category-color"></span>
+    </div>
+    
+    <div class="popup-content">
+      <p id="tip-content">Tip içeriği buraya gelecek...</p>
+    </div>
+    
+    <!-- Progress bar for levels 4-6 -->
+    <div class="progress-container" id="progress-container" style="display: none;">
+      <div class="progress-bar" id="progress-bar"></div>
+    </div>
+    
+    <!-- Math question for levels 7-9 -->
+    <div class="math-question" id="math-question" style="display: none;">
+      <p id="math-problem">Soruyu çöz: </p>
+      <input type="number" id="math-answer" placeholder="Cevabınız">
+      <button id="math-submit">Cevapla</button>
+    </div>
+    
+    <!-- Confetti canvas for level 10 -->
+    <canvas id="confetti-canvas" style="display: none;"></canvas>
+    
+    <!-- Follow-up question for timer end -->
+    <div class="follow-up-question" id="follow-up-question" style="display: none;">
+      <p>Devam ettin mi?</p>
+      <div class="follow-up-actions">
+        <button id="follow-up-yes" class="btn-primary">Evet</button>
+        <button id="follow-up-no" class="btn-secondary">Hayır</button>
+      </div>
+    </div>
+    
+    <div class="popup-actions" id="popup-actions">
+      <button id="two-min-btn" class="btn-secondary">2 Dakika Yap</button>
+      <button id="dismiss-btn" class="btn-primary">Dismiss</button>
+    </div>
+    
+    <div class="dismiss-reasons" id="dismiss-reasons">
+      <button class="reason-btn" data-reason="no_time">Zaman yok</button>
+      <button class="reason-btn" data-reason="dont_know_how">Bilmiyorum</button>
+      <button class="reason-btn" data-reason="no_motivation">Motivasyon yok</button>
+      <button class="reason-btn" data-reason="not_now">Şimdi değil</button>
+    </div>
+  </div>
+  
+  <script src="js/popup.js"></script>
+</body>
+</html>
