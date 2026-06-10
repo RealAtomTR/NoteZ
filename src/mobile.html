@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="color-scheme" content="dark">
+  <title>NoteZ - Mobile</title>
+  <link rel="stylesheet" href="styles/variables.css">
+  <link rel="stylesheet" href="styles/popup.css">
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      overflow: hidden;
+    }
+    
+    #mobile-container {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(10px);
+    }
+    
+    #main-view {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 90%;
+      max-width: 400px;
+    }
+    
+    .mobile-btn {
+      width: 100%;
+      padding: 16px;
+      margin: 8px 0;
+      border: none;
+      border-radius: 12px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    
+    .mobile-btn:active {
+      transform: scale(0.98);
+    }
+    
+    .btn-primary {
+      background: var(--primary-color);
+      color: var(--text-primary);
+    }
+    
+    .btn-secondary {
+      background: var(--background-dark);
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+    }
+    
+    .btn-danger {
+      background: var(--danger-color);
+      color: var(--text-primary);
+    }
+    
+    .btn-success {
+      background: var(--success-color);
+      color: var(--background-dark);
+    }
+    
+    #settings-view {
+      display: none;
+      width: 90%;
+      max-width: 400px;
+      background: var(--background-light);
+      border-radius: 16px;
+      padding: 20px;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+    
+    .setting-item {
+      margin-bottom: 16px;
+    }
+    
+    .setting-item label {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--text-secondary);
+      font-size: 14px;
+    }
+    
+    .setting-item input,
+    .setting-item select {
+      width: 100%;
+      padding: 12px;
+      background: var(--background-dark);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      color: var(--text-primary);
+      font-size: 16px;
+    }
+    
+    #checkin-view {
+      display: none;
+      width: 90%;
+      max-width: 400px;
+      background: var(--background-light);
+      border-radius: 16px;
+      padding: 24px;
+      text-align: center;
+    }
+    
+    .checkin-message {
+      font-size: 18px;
+      margin-bottom: 20px;
+      color: var(--text-primary);
+    }
+    
+    .streak-counter {
+      font-size: 48px;
+      font-weight: bold;
+      color: var(--primary-color);
+      margin: 16px 0;
+    }
+    
+    .streak-label {
+      font-size: 14px;
+      color: var(--text-secondary);
+    }
+  </style>
+</head>
+<body>
+  <div id="mobile-container">
+    <!-- Main View -->
+    <div id="main-view">
+      <h1 style="color: var(--text-primary); margin-bottom: 8px;">NoteZ</h1>
+      <p style="color: var(--text-secondary); margin-bottom: 24px;">Popup Reminder System</p>
+      
+      <button id="show-popup-btn" class="mobile-btn btn-primary">Popup Göster</button>
+      <button id="settings-btn" class="mobile-btn btn-secondary">Ayarlar</button>
+      <button id="checkin-btn" class="mobile-btn btn-success">Günlük Check-in</button>
+    </div>
+    
+    <!-- Settings View -->
+    <div id="settings-view">
+      <h2 style="color: var(--text-primary); margin-bottom: 20px;">Ayarlar</h2>
+      
+      <div class="setting-item">
+        <label for="daily-count">Günlük Popup Sayısı</label>
+        <input type="number" id="daily-count" min="1" max="20" value="5">
+      </div>
+      
+      <div class="setting-item">
+        <label for="time-window-start">Başlangıç Saati</label>
+        <input type="time" id="time-window-start" value="09:00">
+      </div>
+      
+      <div class="setting-item">
+        <label for="time-window-end">Bitiş Saati</label>
+        <input type="time" id="time-window-end" value="22:00">
+      </div>
+      
+      <button id="save-settings-btn" class="mobile-btn btn-primary">Kaydet</button>
+      <button id="back-btn" class="mobile-btn btn-secondary">Geri</button>
+    </div>
+    
+    <!-- Check-in View -->
+    <div id="checkin-view">
+      <h2 style="color: var(--text-primary); margin-bottom: 16px;">Günlük Check-in</h2>
+      
+      <div class="streak-counter" id="streak-count">0</div>
+      <div class="streak-label">Gün Serisi</div>
+      
+      <p class="checkin-message">Bugün konularına bir göz attın mı?</p>
+      
+      <button id="checkin-yes-btn" class="mobile-btn btn-success">Evet</button>
+      <button id="checkin-no-btn" class="mobile-btn btn-danger">Hayır</button>
+      <button id="checkin-back-btn" class="mobile-btn btn-secondary">Geri</button>
+      
+      <div id="checkin-reward" style="display: none; margin-top: 16px; padding: 12px; background: rgba(0, 255, 136, 0.1); border-radius: 8px; color: var(--success-color); font-size: 14px;"></div>
+    </div>
+  </div>
+  
+  <script src="js/mobile.js"></script>
+</body>
+</html>

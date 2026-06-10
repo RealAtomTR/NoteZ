@@ -53,5 +53,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onTimerStop: (callback) => ipcRenderer.on('timer-stop', (event) => callback()),
   
   // Follow-up popup listener
-  onShowFollowUp: (callback) => ipcRenderer.on('show-follow-up', (event, data) => callback(data))
+  onShowFollowUp: (callback) => ipcRenderer.on('show-follow-up', (event, data) => callback(data)),
+  
+  // Focus mode controls
+  getFocusMode: () => ipcRenderer.invoke('get-focus-mode'),
+  activateFocusMode: (categoryId, categoryName, categoryColor) => ipcRenderer.invoke('activate-focus-mode', categoryId, categoryName, categoryColor),
+  deactivateFocusMode: () => ipcRenderer.invoke('deactivate-focus-mode')
 });

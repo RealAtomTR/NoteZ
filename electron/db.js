@@ -19,6 +19,9 @@ async function initialize() {
   if (fs.existsSync(dbPath)) {
     const fileBuffer = fs.readFileSync(dbPath);
     db = new SQL.Database(fileBuffer);
+    // Ensure all tables exist (for migrations)
+    createTables();
+    saveDatabase();
   } else {
     db = new SQL.Database();
     createTables();

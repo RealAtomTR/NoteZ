@@ -12,6 +12,7 @@ let randomPopupInterval = null;
 let lastShownTips = new Map(); // Track tips shown in last hour
 let audioSettings = null; // Cache audio settings
 let currentTipForTimer = null; // Store tip data for timer follow-up
+let focusMode = null; // Focus mode state: { categoryId, categoryName, categoryColor } or null
 
 // Initialize database (async)
 async function initApp() {
@@ -113,7 +114,28 @@ function createTray() {
   const icon = nativeImage.createEmpty();
   tray = new Tray(icon);
 
-  const contextMenu = Menu.buildFromTemplate([
+  updateTrayMenu();
+  tray.setToolTip('NoteZ - Popup Reminder System');
+}
+
+function updateTrayMenu() {
+  // Get all categories from database
+  const categories = db.query(`
+    SELECT id, name, color
+    FROM categories
+    ORDER BY name
+  `);
+
+  // Build Focus Mode submenu
+  const focusModeSubmenuItems = categories.map(category => ({
+    label: category.name,
+    click: () => {
+      activateFocusMode(category.id, category.name, category.color);
+    }
+  }));
+
+  // Build main menu template
+  const menuTemplate = [
     {
       label: 'Kategorileri Yönet',
       click: () => {
@@ -122,38 +144,145 @@ function createTray() {
       }
     },
     {
-      label: 'Aktif Focus Modu',
-      type: 'checkbox',
-      checked: false,
-      click: (menuItem) => {
-        // Focus mode logic will be implemented later
-        console.log('Focus mode toggled:', menuItem.checked);
-      }
-    },
-    { type: 'separator' },
-    {
-      label: 'Ayarlar',
-      click: () => {
-        if (!mainWindow) createMainWindow();
-        mainWindow.show();
-      }
-    },
-    {
-      label: 'Çıkış',
-      click: () => {
-        app.quit();
-      }
+      label: 'Focus Modu',
+      submenu: focusModeSubmenuItems.length > 0 ? focusModeSubmenuItems : [{ label: 'Henüz kategori yok', enabled: false }]
     }
-  ]);
+  ];
 
+  // Add "Focus Modu Kapat" if focus mode is active
+  if (focusMode) {
+    menuTemplate.splice(2, 0, {
+      label: `Focus Modu Kapat (${focusMode.categoryName})`,
+      click: () => {
+        deactivateFocusMode();
+      }
+    });
+  }
+
+  menuTemplate.push({ type: 'separator' });
+  menuTemplate.push({
+    label: 'Ayarlar',
+    click: () => {
+      if (!mainWindow) createMainWindow();
+      mainWindow.show();
+    }
+  });
+  menuTemplate.push({
+    label: 'Çıkış',
+    click: () => {
+      app.quit();
+    }
+  });
+
+  const contextMenu = Menu.buildFromTemplate(menuTemplate);
   tray.setContextMenu(contextMenu);
-  tray.setToolTip('NoteZ - Popup Reminder System');
+}
+
+function activateFocusMode(categoryId, categoryName, categoryColor) {
+  focusMode = {
+    categoryId,
+    categoryName,
+    categoryColor
+  };
+
+  // Update tray icon color
+  updateTrayIconColor(categoryColor);
+
+  // Update tray menu
+  updateTrayMenu();
+
+  // Show notification
+  showFocusModeNotification(categoryName, true);
+
+  // Restart tracking with new focus mode settings
+  restartTracking();
+
+  console.log(`Focus mode activated for category: ${categoryName}`);
+}
+
+function deactivateFocusMode() {
+  const categoryName = focusMode.categoryName;
+  focusMode = null;
+
+  // Reset tray icon color
+  updateTrayIconColor(null);
+
+  // Update tray menu
+  updateTrayMenu();
+
+  // Show notification
+  showFocusModeNotification(categoryName, false);
+
+  // Restart tracking with normal settings
+  restartTracking();
+
+  console.log(`Focus mode deactivated for category: ${categoryName}`);
+}
+
+function updateTrayIconColor(color) {
+  // Create a colored tray icon
+  if (color) {
+    // Create a simple colored icon (16x16 pixels)
+    const size = 16;
+    const buffer = Buffer.alloc(size * size * 4);
+    
+    // Fill with the category color
+    for (let i = 0; i < buffer.length; i += 4) {
+      // Parse hex color to RGB
+      const r = parseInt(color.slice(1, 3), 16);
+      const g = parseInt(color.slice(3, 5), 16);
+      const b = parseInt(color.slice(5, 7), 16);
+      
+      buffer[i] = r;     // Red
+      buffer[i + 1] = g; // Green
+      buffer[i + 2] = b; // Blue
+      buffer[i + 3] = 255; // Alpha
+    }
+    
+    const coloredIcon = nativeImage.createFromBuffer(buffer, { width: size, height: size });
+    tray.setImage(coloredIcon);
+  } else {
+    // Reset to empty icon
+    const emptyIcon = nativeImage.createEmpty();
+    tray.setImage(emptyIcon);
+  }
+}
+
+function showFocusModeNotification(categoryName, activating) {
+  const message = activating 
+    ? `${categoryName} moduna girildi`
+    : `${categoryName} modundan çıkıldı`;
+
+  // Show a native notification
+  const { Notification } = require('electron');
+  
+  if (Notification.isSupported()) {
+    new Notification({
+      title: 'NoteZ - Focus Modu',
+      body: message,
+      silent: true
+    }).show();
+  } else {
+    // Fallback to console if notifications not supported
+    console.log(`Focus Mode: ${message}`);
+  }
+}
+
+function restartTracking() {
+  // Clear existing intervals
+  if (titleCheckInterval) clearInterval(titleCheckInterval);
+  if (randomPopupInterval) clearTimeout(randomPopupInterval);
+
+  // Restart tracking with new focus mode settings
+  startWindowTitleTracking();
+  startRandomPopupTracking();
 }
 
 // Window Title Tracking
 function startWindowTitleTracking() {
-  // Check every 5 seconds
-  titleCheckInterval = setInterval(checkWindowTitle, 5000);
+  // Check every 5 seconds (2.5 seconds if focus mode is active for selected category)
+  const interval = focusMode ? 2500 : 5000;
+  titleCheckInterval = setInterval(checkWindowTitle, interval);
 }
 
 async function checkWindowTitle() {
@@ -179,6 +308,11 @@ async function checkWindowTitle() {
 
     // Check each category's triggers
     for (const category of categories) {
+      // If focus mode is active, skip non-focus categories
+      if (focusMode && category.id !== focusMode.categoryId) {
+        continue;
+      }
+
       const triggers = JSON.parse(category.triggers);
       
       // Check if any trigger matches the window title (case-insensitive)
@@ -304,9 +438,9 @@ function startRandomPopupTracking() {
 }
 
 function scheduleRandomPopup() {
-  // Random interval between 30-90 minutes (in milliseconds)
-  const minInterval = 30 * 60 * 1000;
-  const maxInterval = 90 * 60 * 1000;
+  // Random interval between 30-90 minutes (15-45 minutes if focus mode is active)
+  const minInterval = focusMode ? 15 * 60 * 1000 : 30 * 60 * 1000;
+  const maxInterval = focusMode ? 45 * 60 * 1000 : 90 * 60 * 1000;
   const randomInterval = Math.floor(Math.random() * (maxInterval - minInterval + 1)) + minInterval;
 
   randomPopupInterval = setTimeout(() => {
@@ -322,15 +456,26 @@ function scheduleRandomPopup() {
 function showRandomPopup() {
   // Get any active tip that hasn't been shown in the last hour
   const oneHourAgo = Date.now() - (60 * 60 * 1000);
-  const tips = db.query(`
+  
+  let query = `
     SELECT t.*, c.name as category_name, c.color as category_color
     FROM tips t
     JOIN categories c ON t.category_id = c.id
     WHERE t.status = 'active'
       AND (t.last_shown IS NULL OR t.last_shown < ?)
-    ORDER BY RANDOM()
-    LIMIT 1
-  `, [oneHourAgo]);
+  `;
+  
+  let params = [oneHourAgo];
+  
+  // If focus mode is active, only select tips from focus category
+  if (focusMode) {
+    query += ` AND t.category_id = ?`;
+    params.push(focusMode.categoryId);
+  }
+  
+  query += ` ORDER BY RANDOM() LIMIT 1`;
+  
+  const tips = db.query(query, params);
 
   if (tips.length > 0) {
     const tip = tips[0];
@@ -487,6 +632,21 @@ ipcMain.handle('close-timer', async () => {
   if (timerWindow) {
     timerWindow.close();
   }
+});
+
+// Focus Mode IPC handlers
+ipcMain.handle('get-focus-mode', async () => {
+  return focusMode;
+});
+
+ipcMain.handle('activate-focus-mode', async (event, categoryId, categoryName, categoryColor) => {
+  activateFocusMode(categoryId, categoryName, categoryColor);
+  return focusMode;
+});
+
+ipcMain.handle('deactivate-focus-mode', async () => {
+  deactivateFocusMode();
+  return null;
 });
 
 // Follow-up popup for timer end
