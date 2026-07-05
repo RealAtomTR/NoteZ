@@ -1,0 +1,10 @@
+node_modules/
+build/
+dist/
+android/
+.capacitor/
+*.db
+.env
+/docs/
+/SoundFX/
+/soundfx/

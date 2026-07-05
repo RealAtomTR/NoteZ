@@ -3,18 +3,36 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>2 Dakika Yap</title>
+  <title>Sayaç</title>
+  <script src="js/electron-mock.js"></script>
   <link rel="stylesheet" href="styles/variables.css">
   <link rel="stylesheet" href="styles/timer.css">
 </head>
 <body>
-  <div class="timer-container">
-    <div class="timer-header">2 Dakika Yap</div>
-    <div class="timer-display" id="timer-display">2:00</div>
+  <!-- Drag handle at top -->
+  <div class="drag-handle" id="drag-handle"></div>
+
+  <!-- Timer running state -->
+  <div class="timer-pill" id="timer-running-view">
+    <div class="timer-display" id="timer-display">5:00</div>
     <div class="timer-progress">
       <div class="timer-progress-bar" id="timer-progress-bar"></div>
     </div>
+    <div class="timer-controls">
+      <button id="done-btn" class="btn-done">✓ Bitti</button>
+      <button id="cancel-btn" class="btn-cancel">İptal</button>
+    </div>
   </div>
+
+  <!-- Follow-up question shown when timer ends -->
+  <div class="timer-pill" id="timer-followup-view" style="display:none;">
+    <div class="followup-question">İşiniz Bitti Mi?</div>
+    <div class="followup-buttons">
+      <button id="followup-yes" class="btn-yes">✓ Evet</button>
+      <button id="followup-more" class="btn-more">— dakika daha</button>
+    </div>
+  </div>
+
   <script src="js/timer.js"></script>
 </body>
 </html>
