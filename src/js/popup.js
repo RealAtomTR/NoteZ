@@ -35,6 +35,8 @@ let shakeAnimationId = null;
 let timerInterval = null;
 let isGameSuccess = false;
 let notBitirildiDoneInFlight = false;
+const snoozeReasonUiEnabled = true;
+let popupResizeMode = 'content';
 
 // Wordle State
 let wordleSecretWord = "";
@@ -235,9 +237,9 @@ function setupDismissMechanism() {
   
   // Reset buttons display to default visible states
   dismissBtn.style.display = 'block';
-  if (dismissReasons) dismissReasons.style.display = 'grid';
+  if (dismissReasons) dismissReasons.style.display = snoozeReasonUiEnabled ? 'grid' : 'none';
   const snoozeLimitInfo = document.getElementById('snooze-limit-info');
-  if (snoozeLimitInfo) snoozeLimitInfo.style.display = 'block';
+  if (snoozeLimitInfo) snoozeLimitInfo.style.display = snoozeReasonUiEnabled ? 'block' : 'none';
   twoMinBtn.style.display = 'block';
   
   // Re-enable buttons if they were disabled by a previous click
@@ -250,16 +252,15 @@ function setupDismissMechanism() {
   if (dismissLevel >= 1 && dismissLevel <= 3) {
     // Single click dismiss
     setupSingleClickDismiss();
-  } else if (dismissLevel >= 4 && dismissLevel <= 9) {
-    // Chess/Hold/Math for levels 4-9
-    setupLevelTen();
+  } else if (dismissLevel >= 4 && dismissLevel <= 5) {
+    // Hold-to-dismiss with progress bar
+    setupHoldToDismiss();
+  } else if (dismissLevel >= 6 && dismissLevel <= 9) {
+    // Wordle dismiss game
+    setupWordleDismiss();
   } else if (dismissLevel === 10) {
-    // Hide dismiss buttons, snooze reasons, and show only 5-minute button
-    dismissBtn.style.display = 'none';
-    if (dismissReasons) dismissReasons.style.display = 'none';
-    const snoozeLimitInfo = document.getElementById('snooze-limit-info');
-    if (snoozeLimitInfo) snoozeLimitInfo.style.display = 'none';
-    twoMinBtn.style.display = 'block';
+    // Chess dismiss game
+    setupLevelTen();
   }
 }
 
@@ -615,7 +616,7 @@ function submitWordleGuess() {
     }
     
     setTimeout(() => {
-      if (dismissReasons) {
+      if (snoozeReasonUiEnabled && dismissReasons) {
         dismissReasons.style.display = 'grid';
         dismissReasons.classList.add('show');
       }
@@ -1159,6 +1160,12 @@ async function checkSnoozeLimits(tipId, importance) {
   const snoozeLimitInfo = document.getElementById('snooze-limit-info');
   const dismissReasons = document.getElementById('dismiss-reasons');
   if (!snoozeLimitInfo || !dismissReasons) return;
+  if (!snoozeReasonUiEnabled) {
+    dismissReasons.style.display = 'none';
+    snoozeLimitInfo.style.display = 'none';
+    triggerPopupResize();
+    return;
+  }
 
   if (importance === 10) {
     dismissReasons.style.display = 'none';
@@ -1308,6 +1315,7 @@ function startFiveMinuteTimer() {
   if (notBitirildiScreen) notBitirildiScreen.style.display = 'none';
   
   const isDebugMode = localStorage.getItem('timer_debug_mode') === 'true';
+  popupResizeMode = 'timer';
   if (popupContainer) popupContainer.classList.add('timer-active');
   if (timerScreen) timerScreen.style.display = 'flex';
   if (timerPill) timerPill.style.display = 'none';
@@ -1315,6 +1323,9 @@ function startFiveMinuteTimer() {
   if (deadlineBadge) deadlineBadge.style.display = 'none';
   if (impBadge) impBadge.style.display = 'none';
   if (categoryColor) categoryColor.style.display = 'none';
+  if (window.electronAPI && window.electronAPI.popupResize) {
+    window.electronAPI.popupResize(150, { mode: 'timer' });
+  }
   if (timerDoneBtn) {
     timerDoneBtn.disabled = false;
     timerDoneBtn.onclick = () => {
@@ -1364,6 +1375,7 @@ function startFiveMinuteTimer() {
   }, 1000);
 }
 function showNotBitirildiScreen() {
+  popupResizeMode = 'content';
   if (popupContainer) popupContainer.classList.remove('timer-active');
   if (timerScreen) timerScreen.style.display = 'none';
   if (timerDoneBtn) timerDoneBtn.disabled = false;
@@ -1411,7 +1423,7 @@ function showNotBitirildiScreen() {
 
   if (dismissLevel === 10) {
     if (notBitirildiDoneBtn) notBitirildiDoneBtn.textContent = 'Hallettim';
-    if (notBitirildiContinueBtn) notBitirildiContinueBtn.textContent = 'Ertele';
+    if (notBitirildiContinueBtn) notBitirildiContinueBtn.textContent = 'Hayır';
   } else {
     if (notBitirildiDoneBtn) notBitirildiDoneBtn.textContent = 'Tamamlandı';
     if (notBitirildiContinueBtn) notBitirildiContinueBtn.textContent = 'Hayır';
@@ -1486,7 +1498,7 @@ function setupFollowUpHandlers() {
       }
       
       // Show dismiss reason buttons immediately
-      if (dismissReasons) {
+      if (snoozeReasonUiEnabled && dismissReasons) {
         dismissReasons.style.display = 'grid';
         dismissReasons.classList.add('show');
       }
@@ -1574,7 +1586,8 @@ function triggerPopupResize() {
   if (window.electronAPI && window.electronAPI.popupResize) {
     const runResize = () => {
       const height = document.documentElement.scrollHeight || document.body.scrollHeight;
-      window.electronAPI.popupResize(height + 20); // 20px padding payı ekle
+      const mode = popupResizeMode;
+      window.electronAPI.popupResize(height + 20, { mode }); // 20px padding payı ekle
     };
     
     requestAnimationFrame(() => {
@@ -1789,19 +1802,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   
   if (notBitirildiContinueBtn) {
     notBitirildiContinueBtn.onclick = async () => {
-      if (dismissLevel === 10 && currentTip && window.electronAPI && window.electronAPI.dbRun) {
-        try {
-          const snoozedUntil = new Date(Date.now() + 3600000).toISOString(); // 1 hour later
-          await window.electronAPI.dbRun(`
-            UPDATE tips
-            SET snoozed_until = ?
-            WHERE id = ?
-          `, [snoozedUntil, currentTip.id]);
-          await window.electronAPI.logDismissReason(currentTip.id, 'remind_1h');
-        } catch (error) {
-          console.error('Error applying level 10 snooze:', error);
-        }
-      }
       dismissPopup();
     };
   }

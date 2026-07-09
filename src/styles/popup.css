@@ -132,7 +132,8 @@ html, body {
 .popup-actions {
   display: flex;
   gap: var(--spacing-md);
-  justify-content: flex-end;
+  justify-content: center;
+  align-items: center;
 }
 
 /* Buttons */
@@ -177,6 +178,8 @@ html, body {
   color: white;
   border-radius: 20px;
   padding: var(--spacing-xs) var(--spacing-md);
+  min-width: 128px;
+  text-align: center;
 }
 
 .btn-cyan:hover {
@@ -190,6 +193,11 @@ html, body {
   gap: var(--spacing-sm);
   flex-wrap: wrap;
   justify-content: center;
+}
+
+.popup-card.timer-active .dismiss-reasons,
+.popup-card.timer-active .snooze-limit-info {
+  display: none !important;
 }
 
 .reason-btn {

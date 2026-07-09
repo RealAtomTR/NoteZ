@@ -60,6 +60,13 @@ function createTables() {
       show_count INTEGER DEFAULT 0,
       status TEXT DEFAULT 'active' CHECK(status IN ('active', 'retired', 'done', 'cancelled')),
       last_shown INTEGER,
+      archived_at TEXT DEFAULT NULL,
+      recurring_type TEXT DEFAULT 'none',
+      recurring_interval INTEGER DEFAULT 1,
+      recurring_days TEXT DEFAULT NULL,
+      next_due_at TEXT DEFAULT NULL,
+      last_completed_at TEXT DEFAULT NULL,
+      needs_review INTEGER DEFAULT 0,
       created_at INTEGER NOT NULL,
       FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
     )
@@ -149,7 +156,7 @@ function runMigrations() {
   }
 
   // Migration 003: rebuild dismiss_log with extended reason constraint
-  // Adds new reason values (not_today, remind_1h) while keeping old ones (no_time, dont_know_how)
+  // Adds new reason values while keeping old ones (no_time, dont_know_how)
   // Data is preserved via INSERT INTO ... SELECT
   try {
     const tableExists = db.exec(
@@ -160,9 +167,9 @@ function runMigrations() {
       CREATE TABLE IF NOT EXISTS dismiss_log_new (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         tip_id INTEGER NOT NULL,
-        reason TEXT CHECK(
+          reason TEXT CHECK(
           reason IN ('no_time','dont_know_how','no_motivation','not_now',
-                     'not_today','remind_1h')
+                     'not_today','remind_1h','task_too_big','unclear')
           OR reason IS NULL
         ),
         dismissed_at INTEGER NOT NULL,
@@ -302,10 +309,14 @@ function runMigrations() {
 
   // Migration 012: update tips status constraint to include 'cancelled'
   try {
-    const checkTable = db.exec(
-      `SELECT name FROM sqlite_master WHERE type='table' AND name='tips_new'`
+    const tableSqlResult = db.exec(
+      `SELECT sql FROM sqlite_master WHERE type='table' AND name='tips'`
     );
-    if (!checkTable.length || !checkTable[0].values.length) {
+    const tableSql = tableSqlResult?.[0]?.values?.[0]?.[0] || '';
+    if (!tableSql.includes("'cancelled'")) {
+      const columns = query(`PRAGMA table_info(tips)`).map(col => col.name);
+      const hasFocusDuration = columns.includes('focus_duration');
+
       db.exec('BEGIN TRANSACTION');
 
       db.exec(`
@@ -317,6 +328,13 @@ function runMigrations() {
           show_count INTEGER DEFAULT 0,
           status TEXT DEFAULT 'active' CHECK(status IN ('active', 'retired', 'done', 'cancelled')),
           last_shown INTEGER,
+          archived_at TEXT DEFAULT NULL,
+          recurring_type TEXT DEFAULT 'none',
+          recurring_interval INTEGER DEFAULT 1,
+          recurring_days TEXT DEFAULT NULL,
+          next_due_at TEXT DEFAULT NULL,
+          last_completed_at TEXT DEFAULT NULL,
+          needs_review INTEGER DEFAULT 0,
           created_at INTEGER NOT NULL,
           deadline TEXT DEFAULT NULL,
           snoozed_until TEXT DEFAULT NULL,
@@ -324,13 +342,14 @@ function runMigrations() {
           subcategory_id INTEGER DEFAULT NULL,
           order_index INTEGER DEFAULT 0,
           prerequisite_tip_id INTEGER DEFAULT NULL REFERENCES tips(id),
+          focus_duration INTEGER DEFAULT 5,
           FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
         )
       `);
 
       db.exec(`
-        INSERT INTO tips_new (id, category_id, content, importance, show_count, status, last_shown, created_at, deadline, snoozed_until, tip_tracking_app, subcategory_id, order_index, prerequisite_tip_id)
-        SELECT id, category_id, content, importance, show_count, status, last_shown, created_at, deadline, snoozed_until, tip_tracking_app, subcategory_id, order_index, prerequisite_tip_id
+        INSERT INTO tips_new (id, category_id, content, importance, show_count, status, last_shown, archived_at, recurring_type, recurring_interval, recurring_days, next_due_at, last_completed_at, needs_review, created_at, deadline, snoozed_until, tip_tracking_app, subcategory_id, order_index, prerequisite_tip_id, focus_duration)
+        SELECT id, category_id, content, importance, show_count, status, last_shown, ${columns.includes('archived_at') ? 'archived_at' : 'NULL'}, ${columns.includes('recurring_type') ? 'recurring_type' : "'none'"}, ${columns.includes('recurring_interval') ? 'recurring_interval' : '1'}, ${columns.includes('recurring_days') ? 'recurring_days' : 'NULL'}, ${columns.includes('next_due_at') ? 'next_due_at' : 'NULL'}, ${columns.includes('last_completed_at') ? 'last_completed_at' : 'NULL'}, ${columns.includes('needs_review') ? 'needs_review' : '0'}, created_at, deadline, snoozed_until, tip_tracking_app, subcategory_id, order_index, prerequisite_tip_id, ${hasFocusDuration ? 'focus_duration' : '5'}
         FROM tips
       `);
 
@@ -339,10 +358,67 @@ function runMigrations() {
 
       db.exec('COMMIT');
       console.log('[DB] Migration 011: tips table recreated with cancelled status constraint');
+    } else {
+      console.log('[DB] Migration 011: cancelled status constraint already exists, skipping');
     }
   } catch (e) {
     db.exec('ROLLBACK');
     console.error('[DB] Migration 011 FAILED:', e.message);
+  }
+
+  // Migration 013: focus_duration column on tips
+  try {
+    db.exec(`ALTER TABLE tips ADD COLUMN focus_duration INTEGER DEFAULT 5`);
+    console.log('[DB] Migration 013: focus_duration column added to tips');
+  } catch (e) {
+    if (e.message && e.message.includes('duplicate column')) {
+      console.log('[DB] Migration 013: focus_duration already exists, skipping');
+    } else {
+      console.error('[DB] Migration 013 FAILED:', e.message);
+    }
+  }
+
+  // Migration 014: archived_at column on tips
+  try {
+    db.exec(`ALTER TABLE tips ADD COLUMN archived_at TEXT DEFAULT NULL`);
+    console.log('[DB] Migration 014: archived_at column added to tips');
+  } catch (e) {
+    if (e.message && e.message.includes('duplicate column')) {
+      console.log('[DB] Migration 014: archived_at already exists, skipping');
+    } else {
+      console.error('[DB] Migration 014 FAILED:', e.message);
+    }
+  }
+
+  const recurringColumns = [
+    ['recurring_type', "TEXT DEFAULT 'none'"],
+    ['recurring_interval', 'INTEGER DEFAULT 1'],
+    ['recurring_days', 'TEXT DEFAULT NULL'],
+    ['next_due_at', 'TEXT DEFAULT NULL'],
+    ['last_completed_at', 'TEXT DEFAULT NULL']
+  ];
+  recurringColumns.forEach(([column, definition]) => {
+    try {
+      db.exec(`ALTER TABLE tips ADD COLUMN ${column} ${definition}`);
+      console.log(`[DB] Migration 015: ${column} column added to tips`);
+    } catch (e) {
+      if (e.message && e.message.includes('duplicate column')) {
+        console.log(`[DB] Migration 015: ${column} already exists, skipping`);
+      } else {
+        console.error(`[DB] Migration 015 ${column} FAILED:`, e.message);
+      }
+    }
+  });
+
+  try {
+    db.exec(`ALTER TABLE tips ADD COLUMN needs_review INTEGER DEFAULT 0`);
+    console.log('[DB] Migration 016: needs_review column added to tips');
+  } catch (e) {
+    if (e.message && e.message.includes('duplicate column')) {
+      console.log('[DB] Migration 016: needs_review already exists, skipping');
+    } else {
+      console.error('[DB] Migration 016 FAILED:', e.message);
+    }
   }
 }
 

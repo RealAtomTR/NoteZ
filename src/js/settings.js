@@ -3,6 +3,12 @@
 // Tab Management
 let openTabs = [{ id: 'home', title: 'Main', pinned: true }];
 let activeTabId = 'home';
+let categoryFilters = {
+  query: '',
+  status: 'all',
+  importance: 'all',
+  deadline: 'all'
+};
 
 // BUG A FIX — Ses test butonu: max 10 sn, disabled state, restart
 let _currentTestAudio = null;
@@ -134,6 +140,20 @@ function _stopCurrentTest() {
 // Use real SQLite data via IPC
 let categories = [];
 let tips = [];
+let noteHoverOpenTimer = null;
+let noteHoverCloseTimer = null;
+let subcategoryHoverTimer = null;
+const NOTE_HOVER_DELAY_MS = 650;
+const SUBCATEGORY_HOVER_DELAY_MS = 450;
+const notificationBudgetDefaults = {
+  notification_max_popups_per_hour: '3',
+  notification_minimum_popup_interval_minutes: '15',
+  notification_same_task_cooldown_minutes: '45',
+  notification_quiet_hours_enabled: '0',
+  notification_quiet_hours_start: '00:00',
+  notification_quiet_hours_end: '10:00',
+  notification_game_mode_apps: ''
+};
 
 // DOM Elements
 const categoriesList = document.getElementById('categories-list');
@@ -149,6 +169,97 @@ const subcategoryModal = document.getElementById('subcategory-modal');
 const subcategoryForm = document.getElementById('subcategory-form');
 const cancelSubcategoryBtn = document.getElementById('cancel-subcategory-btn');
 
+function closeNoteMenus(exceptDropdown = null) {
+  document.querySelectorAll('.note-menu-dropdown.show').forEach(dropdown => {
+    if (dropdown === exceptDropdown) return;
+    dropdown.classList.remove('show');
+    dropdown.closest('.tip-item')?.classList.remove('menu-open', 'menu-hover-open', 'menu-click-open');
+    dropdown.closest('.accordion-item')?.classList.remove('menu-open');
+  });
+}
+
+function setNoteMenuOpen(dropdown, shouldOpen, source = 'manual') {
+  if (!dropdown) return;
+  if (shouldOpen) {
+    closeNoteMenus(dropdown);
+  }
+  const tipItem = dropdown.closest('.tip-item');
+  dropdown.classList.toggle('show', shouldOpen);
+  tipItem?.classList.toggle('menu-open', shouldOpen);
+  tipItem?.classList.toggle('menu-hover-open', shouldOpen && source === 'hover');
+  tipItem?.classList.toggle('menu-click-open', shouldOpen && source !== 'hover');
+  dropdown.closest('.accordion-item')?.classList.toggle('menu-open', shouldOpen);
+}
+
+function clearNoteHoverState(tipItem) {
+  if (!tipItem) return;
+  tipItem.classList.remove('hover-loading', 'hover-ready');
+}
+
+function clearSubcategoryHoverState(item) {
+  if (!item) return;
+  item.classList.remove('subcategory-hover-loading', 'subcategory-hover-open');
+}
+
+function setupDelayedHoverMenus(root) {
+  if (!root || root.dataset.hoverMenusBound === 'true') return;
+  root.dataset.hoverMenusBound = 'true';
+
+  root.addEventListener('mouseover', (e) => {
+    const tipItem = e.target.closest('.tip-item');
+    if (tipItem && root.contains(tipItem) && !tipItem.contains(e.relatedTarget)) {
+      clearTimeout(noteHoverCloseTimer);
+      clearTimeout(noteHoverOpenTimer);
+      document.querySelectorAll('.tip-item.hover-ready, .tip-item.hover-loading').forEach(item => {
+        if (item !== tipItem) clearNoteHoverState(item);
+      });
+      tipItem.classList.add('hover-loading');
+      noteHoverOpenTimer = setTimeout(() => {
+        if (!tipItem.isConnected || tipItem.classList.contains('menu-open')) return;
+        tipItem.classList.remove('hover-loading');
+        const dropdown = tipItem.querySelector('.note-menu-dropdown');
+        if (dropdown) {
+          setNoteMenuOpen(dropdown, true, 'hover');
+        } else {
+          tipItem.classList.add('hover-ready');
+        }
+      }, NOTE_HOVER_DELAY_MS);
+    }
+
+    const accordionItem = e.target.closest('.accordion-item');
+    if (accordionItem && root.contains(accordionItem) && !accordionItem.contains(e.relatedTarget)) {
+      clearTimeout(subcategoryHoverTimer);
+      document.querySelectorAll('.accordion-item.subcategory-hover-open, .accordion-item.subcategory-hover-loading').forEach(item => {
+        if (item !== accordionItem) clearSubcategoryHoverState(item);
+      });
+      accordionItem.classList.add('subcategory-hover-loading');
+      subcategoryHoverTimer = setTimeout(() => {
+        if (!accordionItem.isConnected || accordionItem.classList.contains('menu-open')) return;
+        accordionItem.classList.remove('subcategory-hover-loading');
+        accordionItem.classList.add('subcategory-hover-open');
+      }, SUBCATEGORY_HOVER_DELAY_MS);
+    }
+  });
+
+  root.addEventListener('mouseout', (e) => {
+    const tipItem = e.target.closest('.tip-item');
+    if (tipItem && root.contains(tipItem) && !tipItem.contains(e.relatedTarget)) {
+      clearTimeout(noteHoverOpenTimer);
+      noteHoverCloseTimer = setTimeout(() => {
+        clearNoteHoverState(tipItem);
+        if (tipItem.classList.contains('menu-hover-open')) {
+          setNoteMenuOpen(tipItem.querySelector('.note-menu-dropdown'), false);
+        }
+      }, 120);
+    }
+
+    const accordionItem = e.target.closest('.accordion-item');
+    if (accordionItem && root.contains(accordionItem) && !accordionItem.contains(e.relatedTarget)) {
+      clearTimeout(subcategoryHoverTimer);
+      clearSubcategoryHoverState(accordionItem);
+    }
+  });
+}
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
   if (window.electronAPI && window.electronAPI.showPopup) {
@@ -272,6 +383,7 @@ async function loadTips() {
       SELECT t.*, c.name as category_name, c.color as category_color
       FROM tips t
       LEFT JOIN categories c ON t.category_id = c.id
+      WHERE t.archived_at IS NULL
       ORDER BY t.created_at DESC
     `);
     renderTips();
@@ -316,6 +428,8 @@ async function loadAudioSettings() {
         intensityEl.value = settingsMap['popup_intensity'];
       }
     }
+
+    loadNotificationBudgetControls(settingsMap);
     
     const sfxKeys = [
       { id: 'sound-level-1-3', dbKey: 'sound_level_1_3' },
@@ -348,7 +462,7 @@ async function loadAudioSettings() {
       }
     });
     
-    // Initialize audio manager with settings
+// Initialize audio manager with settings
     if (window.audioManager) {
       await window.audioManager.initialize({
         volume: (parseInt(settingsMap['audio_volume']) || 50) / 100,
@@ -400,6 +514,7 @@ async function loadAudioSettings() {
 function setupEventListeners() {
   // Use event delegation on main content wrapper
   const contentWrapper = document.querySelector('.content-wrapper');
+  setupDelayedHoverMenus(contentWrapper);
 
   contentWrapper.addEventListener('click', async (e) => {
     // Test popup button
@@ -571,6 +686,22 @@ function setupEventListeners() {
       }
     }
 
+    // Status Ring Click
+    if (e.target.closest('.status-ring')) {
+      e.preventDefault();
+      e.stopPropagation();
+      const ring = e.target.closest('.status-ring');
+      const tipItem = ring.closest('.tip-item');
+      const tipId = tipItem ? parseInt(tipItem.getAttribute('data-tip-id')) : NaN;
+      const tip = tips.find(t => t.id === tipId);
+      if (tip) {
+        const states = ['done', 'retired', 'active', 'cancelled'];
+        let curIdx = states.indexOf(tip.status);
+        if (curIdx === -1) curIdx = 0;
+        const nextStatus = states[(curIdx + 1) % states.length];
+        await updateTipStatusInline(tipId, nextStatus);
+      }
+    }
     // Status Cycle Icon Click
     if (e.target.closest('.status-cycle-icon')) {
       e.preventDefault();
@@ -638,20 +769,10 @@ function setupEventListeners() {
       const btn = e.target.closest('.note-menu-toggle-btn');
       const dropdown = btn.parentElement.querySelector('.note-menu-dropdown');
       
-      // Hide all other dropdowns
-      document.querySelectorAll('.note-menu-dropdown').forEach(d => {
-        if (d !== dropdown) {
-          d.classList.remove('show');
-          d.closest('.tip-item')?.classList.remove('menu-open');
-          d.closest('.accordion-item')?.classList.remove('menu-open');
-        }
-      });
-      
       if (dropdown) {
         const shouldShow = !dropdown.classList.contains('show');
-        dropdown.classList.toggle('show', shouldShow);
-        dropdown.closest('.tip-item')?.classList.toggle('menu-open', shouldShow);
-        dropdown.closest('.accordion-item')?.classList.toggle('menu-open', shouldShow);
+        clearNoteHoverState(dropdown.closest('.tip-item'));
+        setNoteMenuOpen(dropdown, shouldShow);
       }
     }
 
@@ -670,7 +791,7 @@ function setupEventListeners() {
         }
       }
       const dropdown = item.closest('.note-menu-dropdown');
-      if (dropdown) dropdown.classList.remove('show');
+      if (dropdown) setNoteMenuOpen(dropdown, false);
     }
 
     // Clear Deadline Click
@@ -693,9 +814,7 @@ function setupEventListeners() {
       await updateTipProperty(tipId, 'focus_duration', val);
       const dropdown = btn.closest('.note-menu-dropdown');
       if (dropdown) {
-        dropdown.classList.remove('show');
-        dropdown.closest('.tip-item')?.classList.remove('menu-open');
-        dropdown.closest('.accordion-item')?.classList.remove('menu-open');
+        setNoteMenuOpen(dropdown, false);
       }
     }
 
@@ -706,6 +825,15 @@ function setupEventListeners() {
       const item = e.target.closest('.delete-note-item');
       const tipId = parseInt(item.getAttribute('data-tip-id'));
       deleteNote(tipId, item);
+    }
+
+    // Archive Note Item Click (Dropdown action)
+    if (e.target.closest('.archive-note-item')) {
+      e.preventDefault();
+      e.stopPropagation();
+      const item = e.target.closest('.archive-note-item');
+      const tipId = parseInt(item.getAttribute('data-tip-id'));
+      archiveNote(tipId, item);
     }
   });
 
@@ -872,10 +1000,21 @@ function setupEventListeners() {
         volumeValue.textContent = e.target.value + '%';
       }
     }
+
+    if (e.target.closest('#category-search-input')) {
+      refreshCategoryFiltersFromUi();
+      reloadActiveCategoryTab();
+    }
   });
   
   // Dev tools category dropdown change - delegated
   contentWrapper.addEventListener('change', (e) => {
+    if (e.target.closest('.category-filter-control')) {
+      refreshCategoryFiltersFromUi();
+      reloadActiveCategoryTab();
+      return;
+    }
+
     if (e.target.closest('#dev-popup-category')) {
       updateDevTipDropdown(e.target.value);
     }
@@ -907,6 +1046,11 @@ function setupEventListeners() {
     if (e.target.closest('#save-audio-settings')) {
       e.preventDefault();
       saveAudioSettings();
+    }
+
+    if (e.target.closest('#save-notification-budget')) {
+      e.preventDefault();
+      saveNotificationBudgetSettings();
     }
     
     if (e.target.closest('.btn-test') && e.target.closest('.audio-settings-card')) {
@@ -1002,6 +1146,11 @@ function setupEventListeners() {
       devImportMarkdown();
     }
 
+    if (e.target.closest('#dev-readback-md-btn')) {
+      e.preventDefault();
+      devReadBackMarkdown();
+    }
+
     if (e.target.closest('#close-import-success-btn')) {
       e.preventDefault();
       closeImportSuccessModal();
@@ -1021,11 +1170,7 @@ function setupEventListeners() {
   // Close note dropdowns when clicking outside
   document.addEventListener('click', (e) => {
     if (!e.target.closest('.note-menu-wrapper')) {
-      document.querySelectorAll('.note-menu-dropdown').forEach(d => {
-        d.classList.remove('show');
-        d.closest('.tip-item')?.classList.remove('menu-open');
-        d.closest('.accordion-item')?.classList.remove('menu-open');
-      });
+      closeNoteMenus();
     }
   });
 
@@ -1466,6 +1611,63 @@ function renderTips() {
 }
 // Obsolete Chain/Prerequisite functions removed
 
+function setInputValue(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.value = value;
+}
+
+function loadNotificationBudgetControls(settingsMap) {
+  setInputValue('notification-max-popups-per-hour', settingsMap['notification_max_popups_per_hour'] || notificationBudgetDefaults.notification_max_popups_per_hour);
+  setInputValue('notification-minimum-popup-interval', settingsMap['notification_minimum_popup_interval_minutes'] || notificationBudgetDefaults.notification_minimum_popup_interval_minutes);
+  setInputValue('notification-same-task-cooldown', settingsMap['notification_same_task_cooldown_minutes'] || notificationBudgetDefaults.notification_same_task_cooldown_minutes);
+  setInputValue('notification-quiet-hours-start', settingsMap['notification_quiet_hours_start'] || notificationBudgetDefaults.notification_quiet_hours_start);
+  setInputValue('notification-quiet-hours-end', settingsMap['notification_quiet_hours_end'] || notificationBudgetDefaults.notification_quiet_hours_end);
+  setInputValue('notification-game-mode-apps', settingsMap['notification_game_mode_apps'] || notificationBudgetDefaults.notification_game_mode_apps);
+  const quietEnabled = document.getElementById('notification-quiet-hours-enabled');
+  if (quietEnabled) {
+    quietEnabled.checked = (settingsMap['notification_quiet_hours_enabled'] || notificationBudgetDefaults.notification_quiet_hours_enabled) === '1';
+  }
+}
+
+function clampNumberInput(id, min, max, fallback) {
+  const el = document.getElementById(id);
+  const value = Number(el && el.value);
+  if (!Number.isFinite(value)) return String(fallback);
+  return String(Math.min(max, Math.max(min, Math.round(value))));
+}
+
+async function saveNotificationBudgetSettings() {
+  try {
+    if (!window.electronAPI || !window.electronAPI.dbRun) {
+      showToast('IPC bağlantısı hatası.');
+      return;
+    }
+
+    const quietEnabled = document.getElementById('notification-quiet-hours-enabled');
+    const settings = [
+      { key: 'notification_max_popups_per_hour', value: clampNumberInput('notification-max-popups-per-hour', 1, 20, 3) },
+      { key: 'notification_minimum_popup_interval_minutes', value: clampNumberInput('notification-minimum-popup-interval', 1, 240, 15) },
+      { key: 'notification_same_task_cooldown_minutes', value: clampNumberInput('notification-same-task-cooldown', 1, 480, 45) },
+      { key: 'notification_quiet_hours_enabled', value: quietEnabled && quietEnabled.checked ? '1' : '0' },
+      { key: 'notification_quiet_hours_start', value: document.getElementById('notification-quiet-hours-start')?.value || '00:00' },
+      { key: 'notification_quiet_hours_end', value: document.getElementById('notification-quiet-hours-end')?.value || '10:00' },
+      { key: 'notification_game_mode_apps', value: document.getElementById('notification-game-mode-apps')?.value || '' }
+    ];
+
+    for (const setting of settings) {
+      await window.electronAPI.dbRun(`
+        INSERT OR REPLACE INTO settings (key, value)
+        VALUES (?, ?)
+      `, [setting.key, setting.value]);
+    }
+
+    showToast('Notification budget kaydedildi.');
+  } catch (error) {
+    console.error('Error saving notification budget:', error);
+    showToast('Notification budget kaydedilemedi.');
+  }
+}
+
 // Save audio settings
 async function saveAudioSettings() {
   try {
@@ -1616,6 +1818,34 @@ function getStatusText(status) {
   return statusMap[status] || status;
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function getRecurringText(tip) {
+  const type = tip?.recurring_type || 'none';
+  if (type === 'daily') return 'Her gün';
+  if (type === 'weekly') return 'Haftalık';
+  if (type === 'monthly') return 'Aylık';
+  return 'Tekrar yok';
+}
+
+function formatNoteDate(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString('tr-TR', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+function getStatusRingHtml(status) {
+  return `<span class="status-ring status-ring-${status || 'active'}" title="Durum: ${getStatusText(status)}" aria-label="Durum: ${getStatusText(status)}"></span>`;
+}
+
 // Statistics Functions
 let statsToggleMode = 'weekly';
 
@@ -1636,11 +1866,22 @@ async function loadStatistics() {
   }
 
   try {
+    const daysCount = statsToggleMode === 'weekly' ? 7 : 30;
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - daysCount + 1);
+    startDate.setHours(0, 0, 0, 0);
+
     // 1. Fetch completed count
     const completedResult = await window.electronAPI.dbQuery("SELECT COUNT(*) as count FROM tips WHERE status = 'done'");
     const completedCount = completedResult && completedResult[0] ? completedResult[0].count : 0;
+    const periodCompletedResult = await window.electronAPI.dbQuery(`
+      SELECT COUNT(*) as count
+      FROM tips
+      WHERE last_completed_at IS NOT NULL AND last_completed_at >= ?
+    `, [startDate.toISOString()]);
+    const periodCompletedCount = periodCompletedResult && periodCompletedResult[0] ? periodCompletedResult[0].count : 0;
     const completedCountEl = document.getElementById('stats-completed-count');
-    if (completedCountEl) completedCountEl.textContent = completedCount;
+    if (completedCountEl) completedCountEl.textContent = `${periodCompletedCount}/${completedCount}`;
 
     // 2. Fetch avg focus time
     const avgFocusResult = await window.electronAPI.dbQuery(`
@@ -1667,12 +1908,25 @@ async function loadStatistics() {
     const currentStreakEl = document.getElementById('stats-current-streak');
     if (currentStreakEl) currentStreakEl.textContent = `${streak} Gün`;
 
-    // 4. Procrastination Trend Bar Chart
-    const daysCount = statsToggleMode === 'weekly' ? 7 : 30;
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - daysCount + 1);
-    startDate.setHours(0, 0, 0, 0);
+    const needsReviewResult = await window.electronAPI.dbQuery(`
+      SELECT COUNT(*) as count
+      FROM tips
+      WHERE needs_review = 1 AND archived_at IS NULL
+    `);
+    const needsReviewCount = needsReviewResult && needsReviewResult[0] ? needsReviewResult[0].count : 0;
+    const needsReviewCountEl = document.getElementById('stats-needs-review-count');
+    if (needsReviewCountEl) needsReviewCountEl.textContent = needsReviewCount;
 
+    const archivedResult = await window.electronAPI.dbQuery(`
+      SELECT COUNT(*) as count
+      FROM tips
+      WHERE archived_at IS NOT NULL
+    `);
+    const archivedCount = archivedResult && archivedResult[0] ? archivedResult[0].count : 0;
+    const archivedCountEl = document.getElementById('stats-archived-count');
+    if (archivedCountEl) archivedCountEl.textContent = archivedCount;
+
+    // 4. Procrastination Trend Bar Chart
     const dismissals = await window.electronAPI.dbQuery(`
       SELECT dismissed_at FROM dismiss_log 
       WHERE dismissed_at >= ?
@@ -1746,6 +2000,8 @@ async function loadStatistics() {
       'remind_1h': '1 saat sonra hatırlat',
       'no_motivation': 'Motivasyon yok',
       'not_now': 'Şimdi değil',
+      'task_too_big': 'Çok büyük',
+      'unclear': 'Anlaşılmıyor',
       'no_time': 'Bugün değil',
       'dont_know_how': '1 saat sonra hatırlat'
     };
@@ -1755,6 +2011,8 @@ async function loadStatistics() {
       'remind_1h': '#00D9FF',
       'no_motivation': '#FF4757',
       'not_now': '#6C63FF',
+      'task_too_big': '#F97316',
+      'unclear': '#64748B',
       'no_time': '#FFA502',
       'dont_know_how': '#00D9FF'
     };
@@ -1831,6 +2089,10 @@ async function loadStatistics() {
         advice = "Motivasyon eksikliği yaşadığını görüyorum. Unutma, motivasyon eylemden sonra gelir, önce değil. Kendine küçük bir ödül belirle ve ilk 5 dakikayı tamamla!";
       } else if (topReason === 'not_now') {
         advice = "Notları 'Şimdi değil' diyerek geçiştiriyorsun. Dikkatini dağıtan unsurları azaltmak için 'Odaklanma Modu'nu aktif etmeyi ve gereksiz sekmeleri kapatmayı dene.";
+      } else if (topReason === 'task_too_big') {
+        advice = "Notlar sık sık 'Çok büyük' görünüyor. Bir sonraki uygulanabilir adımı ayrı bir nota dönüştürmek başlama eşiğini düşürebilir.";
+      } else if (topReason === 'unclear') {
+        advice = "Bazı notlar yeterince net olmadığı için erteleniyor. Not başlığını bir sonraki fiziksel aksiyonu söyleyecek şekilde yeniden yazmayı dene.";
       } else {
         advice = "Harika gidiyorsun! Notlarını düzenli takip edip ertelemeleri en aza indirmek için planlı çalışmaya devam et. Check-in yapmayı unutma!";
       }
@@ -2268,12 +2530,86 @@ function getDeadlineBadgeHtml(deadlineStr) {
   return `<span class="tag ${badgeClass}">${text}</span>`;
 }
 
+function refreshCategoryFiltersFromUi() {
+  const searchInput = document.getElementById('category-search-input');
+  const statusSelect = document.getElementById('category-status-filter');
+  const importanceSelect = document.getElementById('category-importance-filter');
+  const deadlineSelect = document.getElementById('category-deadline-filter');
+
+  categoryFilters = {
+    query: searchInput ? searchInput.value.trim() : '',
+    status: statusSelect ? statusSelect.value : 'all',
+    importance: importanceSelect ? importanceSelect.value : 'all',
+    deadline: deadlineSelect ? deadlineSelect.value : 'all'
+  };
+}
+
+function syncCategoryFiltersToUi() {
+  const searchInput = document.getElementById('category-search-input');
+  const statusSelect = document.getElementById('category-status-filter');
+  const importanceSelect = document.getElementById('category-importance-filter');
+  const deadlineSelect = document.getElementById('category-deadline-filter');
+
+  if (searchInput && searchInput.value !== categoryFilters.query) searchInput.value = categoryFilters.query;
+  if (statusSelect) statusSelect.value = categoryFilters.status;
+  if (importanceSelect) importanceSelect.value = categoryFilters.importance;
+  if (deadlineSelect) deadlineSelect.value = categoryFilters.deadline;
+}
+
+function reloadActiveCategoryTab() {
+  const activeTab = openTabs.find(t => t.id === activeTabId);
+  if (activeTab && activeTab.categoryId) {
+    loadCategoryTabContent(activeTab.categoryId);
+  }
+}
+
+function matchesImportanceFilter(tip, filterValue) {
+  if (filterValue === 'all') return true;
+
+  const importance = computeEffectiveImportance(tip);
+  if (filterValue === '10') return importance === 10;
+
+  const [min, max] = filterValue.split('-').map(v => parseInt(v, 10));
+  if (Number.isNaN(min) || Number.isNaN(max)) return true;
+  return importance >= min && importance <= max;
+}
+
+function matchesDeadlineFilter(tip, filterValue) {
+  if (filterValue === 'all') return true;
+  if (filterValue === 'none') return !tip.deadline;
+
+  const deadlineTime = tip.deadline ? new Date(tip.deadline).getTime() : NaN;
+  if (Number.isNaN(deadlineTime)) return false;
+
+  if (filterValue === 'overdue') return deadlineTime < Date.now();
+  if (filterValue === 'upcoming') return deadlineTime >= Date.now();
+  return true;
+}
+
+function applyCategoryFilters(categoryTips, subcats) {
+  return categoryTips.filter(tip => {
+    if (categoryFilters.query) {
+      const normalizedQuery = categoryFilters.query.toLowerCase();
+      const subcat = subcats.find(s => s.id === tip.subcategory_id);
+      const haystack = `${tip.content || ''} ${tip.category_name || ''} ${subcat ? subcat.name : ''}`.toLowerCase();
+      if (!haystack.includes(normalizedQuery)) return false;
+    }
+
+    if (categoryFilters.status !== 'all' && tip.status !== categoryFilters.status) return false;
+    if (!matchesImportanceFilter(tip, categoryFilters.importance)) return false;
+    if (!matchesDeadlineFilter(tip, categoryFilters.deadline)) return false;
+
+    return true;
+  });
+}
+
 async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) {
   const category = categories.find(c => c.id === categoryId);
   if (!category) return;
   
   // Update title
   document.getElementById('category-tab-title').textContent = category.name;
+  syncCategoryFiltersToUi();
   
   // Fetch subcategories
   let subcats = [];
@@ -2286,10 +2622,11 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
   }
   
   // Load tips for this category
-  const categoryTips = tips.filter(t => t.category_id === categoryId);
+  const allCategoryTips = tips.filter(t => t.category_id === categoryId);
+  const categoryTips = applyCategoryFilters(allCategoryTips, subcats);
 
   // Ensure Genel subcategory exists only if there are tips that belong to it
-  const hasGenelTips = categoryTips.some(t => t.subcategory_id === null || !subcats.some(s => s.id === t.subcategory_id));
+  const hasGenelTips = allCategoryTips.some(t => t.subcategory_id === null || !subcats.some(s => s.id === t.subcategory_id));
   if (hasGenelTips) {
     let genelSub = subcats.find(s => s.name === 'Genel');
     if (!genelSub) {
@@ -2319,7 +2656,9 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
   
   const hasRealSubcats = subcats.some(s => s.id !== null);
   if (categoryTips.length === 0 && !hasRealSubcats) {
-    categoryTipsContainer.innerHTML = '<p class="placeholder-text">Bu kategoride not yok.</p>';
+    categoryTipsContainer.innerHTML = allCategoryTips.length === 0
+      ? '<p class="placeholder-text">Bu kategoride not yok.</p>'
+      : '<p class="placeholder-text">Filtreye uyan not yok.</p>';
   } else {
     categoryTipsContainer.innerHTML = subcats.map((sub, sIdx) => {
       const isGenel = sub.name === 'Genel';
@@ -2398,8 +2737,8 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
         }
 
         const stepNumHtml = sub.isSequential 
-          ? `<div class="step-number" data-tip-id="${tip.id}" data-subcat-id="${sub.id || ''}">${index + 1}</div>`
-          : `<div class="step-bullet">•</div>`;
+          ? `<div class="step-number" data-tip-id="${tip.id}" data-subcat-id="${sub.id || ''}">${getStatusRingHtml(tip.status)}<span class="step-index">${index + 1}</span></div>`
+          : `<div class="step-bullet">${getStatusRingHtml(tip.status)}</div>`;
           
         const effectiveImportance = computeEffectiveImportance(tip);
         let impClass = '';
@@ -2410,6 +2749,16 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
         
         const importanceTitle = effectiveImportance === tip.importance ? `Önem: ${tip.importance}` : `Önem: ${tip.importance} → ${effectiveImportance}`;
         const importanceBoxHtml = `<div class="importance-box ${impClass}" data-tip-id="${tip.id}" data-importance="${tip.importance}" title="${importanceTitle}">${effectiveImportance}</div>`;
+        const detailsHtml = `
+          <div class="note-details-card note-hover-dropdown" role="tooltip">
+            <div class="note-details-title">${escapeHtml(tip.content)}</div>
+            <div class="note-details-row"><span>Durum</span><strong>${getStatusText(tip.status)}</strong></div>
+            <div class="note-details-row"><span>Önem</span><strong>${effectiveImportance}/10</strong></div>
+            <div class="note-details-row"><span>Oluşturma</span><strong>${formatNoteDate(tip.created_at)}</strong></div>
+            <div class="note-details-row"><span>Deadline</span><strong>${formatNoteDate(tip.deadline)}</strong></div>
+            <div class="note-details-row"><span>Tekrar</span><strong>${getRecurringText(tip)}</strong></div>
+          </div>
+        `;
         
         const showCalendarIcon = sub.deadlineMode !== 'shared';
         const isExpired = tip.deadline && getRelativeDeadlineText(tip.deadline) === 'Geçti!';
@@ -2446,13 +2795,22 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
               ${deadlineBadgeHtml}
               ${chainBadgeHtml}
               ${blockedBadgeHtml}
+              ${detailsHtml}
             </div>
             <div class="step-controls">
               ${importanceBoxHtml}
               
               <div class="note-menu-wrapper">
-                <button class="note-menu-toggle-btn" data-tip-id="${tip.id}" title="İşlemler">&gt;</button>
+                <button class="note-menu-toggle-btn" data-tip-id="${tip.id}" title="İşlemler">›</button>
                 <div class="note-menu-dropdown" data-tip-id="${tip.id}">
+                  <div class="note-menu-summary">
+                    <div class="note-menu-description-label">Açıklama</div>
+                    <div class="note-menu-description">${escapeHtml(tip.content)}</div>
+                    <div class="note-menu-summary-row"><span>Durum</span><strong class="note-menu-summary-status">${getStatusText(tip.status)}</strong></div>
+                    <div class="note-menu-summary-row"><span>Önem</span><strong>${effectiveImportance}/10</strong></div>
+                    <div class="note-menu-summary-row"><span>Tekrar</span><strong>${getRecurringText(tip)}</strong></div>
+                  </div>
+                  <div class="dropdown-divider"></div>
                   <button class="dropdown-item status-cycle-icon ${getStatusClass(tip.status)}" data-tip-id="${tip.id}" title="Durum: ${getStatusText(tip.status)}">${getStatusText(tip.status)}</button>
                   <a class="dropdown-item calendar-trigger-item" data-tip-id="${tip.id}">📅 Tarih Belirle</a>
                   
@@ -2469,6 +2827,7 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
                   </div>
                   
                   <div class="dropdown-divider"></div>
+                  <a class="dropdown-item archive-note-item" data-tip-id="${tip.id}">📦 Arşivle</a>
                   <a class="dropdown-item delete-note-item danger-item" data-tip-id="${tip.id}">🗑️ Sil</a>
                 </div>
                 
@@ -2525,11 +2884,12 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
   // Load category stats
   const categoryStatsContainer = document.getElementById('category-tab-stats');
   if (categoryStatsContainer) {
-    const totalShows = categoryTips.reduce((sum, tip) => sum + (tip.show_count || 0), 0);
+    const totalShows = allCategoryTips.reduce((sum, tip) => sum + (tip.show_count || 0), 0);
+    const visibleShows = categoryTips.reduce((sum, tip) => sum + (tip.show_count || 0), 0);
     categoryStatsContainer.innerHTML = `
       <h3>İstatistikler</h3>
-      <p>Toplam Not: ${categoryTips.length}</p>
-      <p>Toplam Gösterim: ${totalShows}</p>
+      <p>Gösterilen Not: ${categoryTips.length} / ${allCategoryTips.length}</p>
+      <p>Gösterilen Gösterim: ${visibleShows} / ${totalShows}</p>
     `;
   }
 }
@@ -3020,7 +3380,9 @@ async function loadNextPopupTimes() {
       JOIN categories c ON t.category_id = c.id
       LEFT JOIN subcategories sc ON sc.id = t.subcategory_id
       WHERE t.status = 'active'
-    `);
+        AND t.archived_at IS NULL
+        AND (t.next_due_at IS NULL OR t.next_due_at <= ?)
+    `, [new Date().toISOString()]);
     
     let activeWinProcess = '';
     if (window.electronAPI && window.electronAPI.debugGetActiveWindow) {
@@ -3385,15 +3747,9 @@ async function updateTrackingStatus() {
   try {
     const activeWindow = await window.electronAPI.debugGetActiveWindow();
     
-    const statusTextEl = document.querySelector('#active-window-status-indicator .status-text');
-    const statusDotEl = document.querySelector('#active-window-status-indicator .status-dot');
     const devCapturedEl = document.getElementById('dev-captured-window');
     const devMatchingEl = document.getElementById('dev-matching-category');
-
     if (!activeWindow) {
-      if (Date.now() >= matchShownUntil && statusTextEl) {
-        statusTextEl.textContent = 'Takip aktif — Pencere yok';
-      }
       if (devCapturedEl) devCapturedEl.value = 'Aktif pencere yok';
       if (devMatchingEl) devMatchingEl.value = 'Yok';
       return;
@@ -3408,28 +3764,13 @@ async function updateTrackingStatus() {
 
     const matchedCategory = findMatchingCategoryForActiveWindow(activeWindow);
     if (matchedCategory) {
-      if (statusTextEl) {
-        statusTextEl.textContent = `✓ ${matchedCategory.name} eşleşti`;
-        statusTextEl.classList.add('matched');
-      }
       matchShownUntil = Date.now() + 2500;
       
-      setTimeout(() => {
-        const freshStatusTextEl = document.querySelector('#active-window-status-indicator .status-text');
-        if (freshStatusTextEl && Date.now() >= matchShownUntil) {
-          freshStatusTextEl.textContent = `Takip aktif — ${ownerName}`;
-          freshStatusTextEl.classList.remove('matched');
-        }
-      }, 2500);
 
       if (devMatchingEl) {
         devMatchingEl.value = `${matchedCategory.name} (ID: ${matchedCategory.id})`;
       }
     } else {
-      if (Date.now() >= matchShownUntil && statusTextEl) {
-        statusTextEl.textContent = `Takip aktif — ${ownerName}`;
-        statusTextEl.classList.remove('matched');
-      }
       if (devMatchingEl) {
         devMatchingEl.value = 'Yok';
       }
@@ -3473,6 +3814,13 @@ async function devGetActiveWindow() {
 }
 
 
+function formatLocalDateKey(date) {
+  const d = date instanceof Date ? date : new Date(date);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 // Load Dashboard statistics and check-in status
 async function loadDashboard() {
   console.log('[settings] loadDashboard called');
@@ -3538,7 +3886,9 @@ async function loadDashboard() {
   const calendarEl = document.getElementById('dashboard-checkin-calendar');
   if (calendarEl) {
     calendarEl.innerHTML = '';
-    const todayStr = new Date().toISOString().split('T')[0];
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayStr = formatLocalDateKey(today);
     let daysToShow = [];
 
     if (streak < 7) {
@@ -3568,9 +3918,9 @@ async function loadDashboard() {
     daysContainer.className = streak < 7 ? 'calendar-week-view' : 'calendar-month-view';
 
     daysToShow.forEach(d => {
-      const dateStr = d.toISOString().split('T')[0];
+      const dateStr = formatLocalDateKey(d);
       const isToday = (dateStr === todayStr);
-      const isFuture = (d > new Date());
+      const isFuture = d.getTime() > today.getTime();
       
       const histItem = (history || []).find(h => h.date === dateStr);
       const isCompleted = histItem ? histItem.completed : false;
@@ -4101,6 +4451,16 @@ async function updateTipStatusInline(tipId, nextStatus) {
       btn.textContent = getStatusText(nextStatus);
       btn.title = `Durum: ${getStatusText(nextStatus)}`;
     });
+
+    document.querySelectorAll(`.note-menu-dropdown[data-tip-id="${tipId}"] .note-menu-summary-status`).forEach(el => {
+      el.textContent = getStatusText(nextStatus);
+    });
+
+    document.querySelectorAll(`.tip-item[data-tip-id="${tipId}"] .status-ring`).forEach(ring => {
+      ring.className = `status-ring status-ring-${nextStatus}`;
+      ring.title = `Durum: ${getStatusText(nextStatus)}`;
+      ring.setAttribute('aria-label', `Durum: ${getStatusText(nextStatus)}`);
+    });
   } catch (err) {
     console.error('Error updating tip status:', err);
     showToast('Durum güncellenemedi.');
@@ -4330,6 +4690,47 @@ async function executeDeleteNote(tipId) {
   }
 }
 
+function archiveNote(tipId, btn) {
+  if (!btn) return;
+  if (btn.classList.contains('confirm-pending')) {
+    executeArchiveNote(tipId);
+  } else {
+    btn.classList.add('confirm-pending');
+    btn.title = 'Arşivlemek için tekrar tıklayın';
+    btn.style.color = '#6c47ff';
+    showToast('Notu arşivlemek için tekrar tıklayın.');
+
+    setTimeout(() => {
+      btn.classList.remove('confirm-pending');
+      btn.title = 'Notu Arşivle';
+      btn.style.color = '';
+    }, 4000);
+  }
+}
+
+async function executeArchiveNote(tipId) {
+  try {
+    if (!window.electronAPI || !window.electronAPI.dbRun) {
+      console.error('electronAPI.dbRun not available');
+      showToast('IPC bağlantısı hatası.');
+      return;
+    }
+
+    await window.electronAPI.dbRun(`UPDATE tips SET archived_at = ? WHERE id = ?`, [new Date().toISOString(), tipId]);
+    await loadTips();
+    const activeTab = openTabs.find(t => t.id === activeTabId);
+    if (activeTab && activeTab.categoryId) {
+      await loadCategoryTabContent(activeTab.categoryId);
+    } else if (activeTab && activeTab.id === 'home') {
+      renderCategoryCards();
+    }
+    showToast('Not arşivlendi.');
+  } catch (error) {
+    console.error('Error archiving note:', error);
+    showToast('Not arşivlenirken hata oluştu.');
+  }
+}
+
 // ==========================================================================
 // NEW NOTE MODAL FUNCTIONS
 // ==========================================================================
@@ -4349,6 +4750,8 @@ async function openNoteModal() {
   importanceInput.value = '5';
   importanceVal.textContent = '5';
   deadlineInput.value = '';
+  const recurringSelect = document.getElementById('note-recurring-select');
+  if (recurringSelect) recurringSelect.value = 'none';
   const durationSelect = document.getElementById('note-duration-select');
   if (durationSelect) durationSelect.value = '5';
   
@@ -4428,6 +4831,7 @@ async function handleNoteSubmit(e) {
   const deadline = deadlineVal ? new Date(deadlineVal).toISOString() : null;
   const durationSelect = document.getElementById('note-duration-select');
   const focusDuration = durationSelect ? parseInt(durationSelect.value) : 5;
+  const recurringType = document.getElementById('note-recurring-select')?.value || 'none';
 
   if (!categoryId || !content) {
     showToast('Lütfen gerekli alanları doldurun.');
@@ -4441,10 +4845,19 @@ async function handleNoteSubmit(e) {
     const catTips = tips.filter(t => t.category_id === categoryId && t.subcategory_id === subcategoryId);
     const nextOrder = catTips.length + 1;
 
-    await window.electronAPI.dbRun(`
+    const insertResult = await window.electronAPI.dbRun(`
       INSERT INTO tips (category_id, content, importance, show_count, status, last_shown, created_at, deadline, prerequisite_tip_id, subcategory_id, order_index, focus_duration)
       VALUES (?, ?, ?, 0, 'active', NULL, ?, ?, NULL, ?, ?, ?)
     `, [categoryId, content, importance, Date.now(), deadline, subcategoryId, nextOrder, focusDuration]);
+
+    const insertedTipId = insertResult && (insertResult.lastID || insertResult.lastInsertRowid);
+    if (insertedTipId && recurringType !== 'none') {
+      await window.electronAPI.dbRun(`
+        UPDATE tips
+        SET recurring_type = ?, recurring_interval = 1, next_due_at = ?
+        WHERE id = ?
+      `, [recurringType, deadline, insertedTipId]);
+    }
 
     await loadTips();
     
@@ -4482,6 +4895,36 @@ async function devImportMarkdown() {
   } catch (error) {
     console.error('Error importing markdown:', error);
     showToast('Hata oluştu.');
+  }
+}
+
+async function devReadBackMarkdown() {
+  try {
+    if (!window.electronAPI || !window.electronAPI.markdownReadBack) {
+      showToast('Markdown read-back IPC kanalı hazır değil.');
+      return;
+    }
+
+    const res = await window.electronAPI.markdownReadBack();
+    if (!res || !res.success) {
+      showToast(`MD değişiklikleri okunamadı: ${res && res.error ? res.error : 'Bilinmeyen hata'}`);
+      return;
+    }
+
+    await loadCategories();
+    await loadTips();
+    const activeTab = openTabs.find(t => t.id === activeTabId);
+    if (activeTab && activeTab.categoryId) {
+      await loadCategoryTabContent(activeTab.categoryId);
+    } else {
+      renderCategoryCards();
+    }
+
+    const total = (res.categoriesUpdated || 0) + (res.subcategoriesUpdated || 0) + (res.notesUpdated || 0);
+    showToast(`MD değişiklikleri okundu: ${total} kayıt güncellendi.`);
+  } catch (error) {
+    console.error('Error reading markdown storage:', error);
+    showToast('MD değişiklikleri okunurken hata oluştu.');
   }
 }
 

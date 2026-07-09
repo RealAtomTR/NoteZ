@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   closePopup: () => ipcRenderer.invoke('close-popup'),
   showSettings: () => ipcRenderer.invoke('show-settings'),
   getPopupData: () => ipcRenderer.invoke('get-popup-data'),
+  quickCaptureSave: (content) => ipcRenderer.invoke('quick-capture-save', content),
 
   // Data update event listeners
   onDataUpdated: (callback) => ipcRenderer.on('data-updated', (event, data) => callback(data)),
@@ -79,13 +80,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
 
   // FIX 2: Popup dynamic resize — called by popup.js after content renders
-  popupResize: (height) => ipcRenderer.invoke('popup-resize', height),
+  popupResize: (height, options = {}) => ipcRenderer.invoke('popup-resize', height, options),
 
   // Check-in controls
   checkinStatus: () => ipcRenderer.invoke('checkin-status'),
   checkinDo: () => ipcRenderer.invoke('checkin-do'),
   checkinHistory: () => ipcRenderer.invoke('checkin-history'),
   closeCheckin: () => ipcRenderer.invoke('close-checkin'),
+  closeQuickCapture: () => window.close(),
 
   // App Tracking — get open windows list (for category/note modal dropdown)
   getActiveWindows: () => ipcRenderer.invoke('get-active-windows'),
@@ -113,6 +115,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Markdown import
   importMarkdownFile: () => ipcRenderer.invoke('import-markdown-file'),
+  markdownRefresh: () => ipcRenderer.invoke('markdown-refresh'),
+  markdownReadBack: () => ipcRenderer.invoke('markdown-read-back'),
 });
 
 // Intercept audio settings initialization to fix the volume = 0 fallback to 50 bug

@@ -1,8 +1,9 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, screen, dialog } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, screen, dialog, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const db = require('./db');
 const activeWin = require('active-win');
+const markdownStorage = require('./markdown-storage');
 
 let mainWindow = null;
 let tray = null;
@@ -10,6 +11,7 @@ let popupWindow = null;
 let timerWindow = null;
 let pendingTipData = null;
 let checkinWindow = null;
+let quickCaptureWindow = null;
 let popupQueue = [];
 let popupQueuedKeys = new Set();
 let activePopupKey = null;
@@ -19,11 +21,72 @@ let lastShownTips = new Map(); // Track tips shown in last hour
 let audioSettings = null; // Cache audio settings
 let currentTipForTimer = null; // Store tip data for timer follow-up
 let focusMode = null; // Focus mode state: { categoryId, categoryName, categoryColor } or null
+let lastActiveProcessName = '';
+let markdownWatcher = null;
+let markdownWatchDebounce = null;
+let lastMarkdownWriteAt = 0;
+let isApplyingMarkdownReadBack = false;
 
 // Initialize database (async)
 async function initApp() {
   await db.initialize();
+  ensureGeneralSubcategoriesForAll();
   loadAudioSettings();
+  syncMarkdownStorageSafe('startup');
+  setupMarkdownStorageWatcher();
+}
+
+function syncMarkdownStorageSafe(reason) {
+  try {
+    lastMarkdownWriteAt = Date.now();
+    const result = markdownStorage.syncFromDatabase(db, reason);
+    lastMarkdownWriteAt = Date.now();
+    console.log(`[MarkdownStorage] Synced (${reason}) to ${result.root}`);
+  } catch (error) {
+    console.error(`[MarkdownStorage] Sync failed (${reason}):`, error.message);
+  }
+}
+
+function setupMarkdownStorageWatcher() {
+  if (markdownWatcher) return;
+
+  try {
+    const root = markdownStorage.ensureStorageTree();
+    markdownWatcher = fs.watch(root, { recursive: true }, (eventType, fileName) => {
+      const changedFile = String(fileName || '');
+      const normalized = changedFile.replace(/\\/g, '/').toLowerCase();
+      if (!normalized.endsWith('.md')) return;
+      if (normalized.startsWith('trash/') || normalized.startsWith('logs/') || normalized.startsWith('settings/')) return;
+      if (isApplyingMarkdownReadBack) return;
+      if (Date.now() - lastMarkdownWriteAt < 2000) return;
+
+      clearTimeout(markdownWatchDebounce);
+      markdownWatchDebounce = setTimeout(() => {
+        if (Date.now() - lastMarkdownWriteAt < 2000 || isApplyingMarkdownReadBack) return;
+
+        isApplyingMarkdownReadBack = true;
+        try {
+          const result = markdownStorage.readBackToDatabase(db, 'watcher-read-back');
+          syncMarkdownStorageSafe('after-watcher-read-back');
+          notifyDataUpdated('categories');
+          notifyDataUpdated('tips');
+          updateTrayMenu();
+          console.log(
+            `[MarkdownStorage] Watcher read-back applied: ${result.categoriesUpdated} categories, ` +
+            `${result.subcategoriesUpdated} subcategories, ${result.notesUpdated} notes`
+          );
+        } catch (error) {
+          console.error('[MarkdownStorage] Watcher read-back failed:', error.message);
+        } finally {
+          isApplyingMarkdownReadBack = false;
+        }
+      }, 1200);
+    });
+
+    console.log(`[MarkdownStorage] Watching ${root}`);
+  } catch (error) {
+    console.error('[MarkdownStorage] Watcher setup failed:', error.message);
+  }
 }
 
 // Load audio settings from database
@@ -128,6 +191,47 @@ function createPopupWindow() {
   });
 
   return popupWindow;
+}
+
+function createQuickCaptureWindow() {
+  if (quickCaptureWindow) {
+    quickCaptureWindow.show();
+    quickCaptureWindow.focus();
+    return quickCaptureWindow;
+  }
+
+  quickCaptureWindow = new BrowserWindow({
+    width: 420,
+    height: 220,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  quickCaptureWindow.loadFile(path.join(__dirname, '../src/quick-capture.html'));
+
+  quickCaptureWindow.on('closed', () => {
+    quickCaptureWindow = null;
+  });
+
+  quickCaptureWindow.once('ready-to-show', () => {
+    quickCaptureWindow.show();
+    quickCaptureWindow.focus();
+  });
+
+  return quickCaptureWindow;
+}
+
+function showQuickCaptureWindow() {
+  createQuickCaptureWindow();
 }
 
 function getPopupKey(item) {
@@ -287,6 +391,13 @@ function updateTrayMenu() {
       }
     },
     {
+      label: 'Quick Capture',
+      accelerator: 'Ctrl+Alt+N',
+      click: () => {
+        showQuickCaptureWindow();
+      }
+    },
+    {
       label: 'Focus Modu',
       submenu: focusModeSubmenuItems.length > 0 ? focusModeSubmenuItems : [{ label: 'Henüz kategori yok', enabled: false }]
     }
@@ -416,6 +527,9 @@ async function checkWindowTitle() {
       return;
     }
 
+    lastActiveProcessName = activeWindow.owner && activeWindow.owner.name
+      ? String(activeWindow.owner.name).toLowerCase()
+      : '';
     const windowTitle = activeWindow.title.toLowerCase();
 
     // Get all categories with their triggers
@@ -486,18 +600,218 @@ function isFullscreenActive() {
   return false;
 }
 
-function selectTipFromCategory(categoryId) {
-  const oneHourAgo = Date.now() - (60 * 60 * 1000);
+const DEFAULT_NOTIFICATION_BUDGET = {
+  maxPopupsPerHour: 3,
+  minimumPopupIntervalMinutes: 15,
+  sameTaskCooldownMinutes: 45,
+  quietHoursEnabled: false,
+  quietHoursStart: '00:00',
+  quietHoursEnd: '10:00'
+};
 
-  // Get active tips from this category, excluding those shown in last hour
+function getSettingNumber(key, fallback) {
+  const row = db.get('SELECT value FROM settings WHERE key = ?', [key]);
+  const value = Number(row && row.value);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function getSettingBool(key, fallback) {
+  const row = db.get('SELECT value FROM settings WHERE key = ?', [key]);
+  if (!row) return fallback;
+  return row.value === '1' || row.value === 'true';
+}
+
+function getNotificationBudget() {
+  return {
+    maxPopupsPerHour: getSettingNumber('notification_max_popups_per_hour', DEFAULT_NOTIFICATION_BUDGET.maxPopupsPerHour),
+    minimumPopupIntervalMinutes: getSettingNumber('notification_minimum_popup_interval_minutes', DEFAULT_NOTIFICATION_BUDGET.minimumPopupIntervalMinutes),
+    sameTaskCooldownMinutes: getSettingNumber('notification_same_task_cooldown_minutes', DEFAULT_NOTIFICATION_BUDGET.sameTaskCooldownMinutes),
+    quietHoursEnabled: getSettingBool('notification_quiet_hours_enabled', DEFAULT_NOTIFICATION_BUDGET.quietHoursEnabled),
+    quietHoursStart: (db.get('SELECT value FROM settings WHERE key = ?', ['notification_quiet_hours_start']) || {}).value || DEFAULT_NOTIFICATION_BUDGET.quietHoursStart,
+    quietHoursEnd: (db.get('SELECT value FROM settings WHERE key = ?', ['notification_quiet_hours_end']) || {}).value || DEFAULT_NOTIFICATION_BUDGET.quietHoursEnd
+  };
+}
+
+function getGameModeApps() {
+  const row = db.get('SELECT value FROM settings WHERE key = ?', ['notification_game_mode_apps']);
+  return String(row?.value || '')
+    .split(',')
+    .map(value => value.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function isGameModeActive() {
+  if (!lastActiveProcessName) return false;
+  const gameModeApps = getGameModeApps();
+  return gameModeApps.some(appName => lastActiveProcessName.includes(appName));
+}
+
+function minutesSinceMidnight(date) {
+  return date.getHours() * 60 + date.getMinutes();
+}
+
+function parseClockMinutes(value) {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(String(value || ''));
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return null;
+  return hours * 60 + minutes;
+}
+
+function isQuietHoursActive(budget, now = new Date()) {
+  if (!budget.quietHoursEnabled) return false;
+  const start = parseClockMinutes(budget.quietHoursStart);
+  const end = parseClockMinutes(budget.quietHoursEnd);
+  if (start === null || end === null || start === end) return false;
+  const current = minutesSinceMidnight(now);
+  return start < end
+    ? current >= start && current < end
+    : current >= start || current < end;
+}
+
+function calculateTipScore(tip, now = Date.now()) {
+  let score = Number(tip.importance || 1) * 10;
+  const taskContextApp = String(tip.tip_tracking_app || '').trim().toLowerCase();
+  if (taskContextApp && lastActiveProcessName.includes(taskContextApp)) {
+    score += 30;
+  }
+
+  if (tip.deadline) {
+    const deadlineTime = new Date(tip.deadline).getTime();
+    if (!Number.isNaN(deadlineTime)) {
+      const daysLeft = (deadlineTime - now) / (24 * 60 * 60 * 1000);
+      if (daysLeft <= 1) score += 45;
+      else if (daysLeft <= 3) score += 30;
+      else if (daysLeft <= 7) score += 15;
+    }
+  }
+  if (tip.snoozed_until && new Date(tip.snoozed_until).getTime() > now) {
+    score -= 100;
+  }
+  return score;
+}
+
+function calculateNextRecurringDue(tip, from = new Date()) {
+  const type = tip && tip.recurring_type;
+  if (!type || type === 'none') return null;
+
+  const interval = Math.max(1, Number(tip.recurring_interval || 1));
+  const next = new Date(from);
+
+  if (type === 'daily') {
+    next.setDate(next.getDate() + interval);
+  } else if (type === 'weekly') {
+    next.setDate(next.getDate() + (7 * interval));
+  } else if (type === 'monthly') {
+    next.setMonth(next.getMonth() + interval);
+  } else {
+    return null;
+  }
+
+  return next.toISOString();
+}
+
+function maybeApplyRecurringCompletion(sql, params = []) {
+  const sqlUpper = String(sql || '').toUpperCase();
+  const tipId = getCompletedStatusTipId(sql, params);
+  if (!tipId) return false;
+
+  const tip = db.get('SELECT * FROM tips WHERE id = ?', [tipId]);
+  const nextDue = calculateNextRecurringDue(tip);
+  if (!nextDue) return false;
+
+  db.run(`
+    UPDATE tips
+    SET status = 'active',
+        last_completed_at = ?,
+        next_due_at = ?,
+        deadline = ?
+    WHERE id = ?
+  `, [new Date().toISOString(), nextDue, nextDue, tipId]);
+  return true;
+}
+
+function getCompletedStatusTipId(sql, params = []) {
+  const sqlUpper = String(sql || '').toUpperCase();
+  if (!sqlUpper.includes('UPDATE TIPS') || !sqlUpper.includes('STATUS')) return null;
+
+  let tipId = null;
+  const statusParamIndex = params.findIndex(value => String(value).toLowerCase() === 'done');
+  if (statusParamIndex !== -1) {
+    tipId = params[statusParamIndex + 1] || params[params.length - 1];
+  } else if (sqlUpper.includes("STATUS = 'DONE'") || sqlUpper.includes('STATUS = "DONE"')) {
+    tipId = params[params.length - 1];
+  }
+
+  return tipId || null;
+}
+
+function markCompletionTimestampIfNeeded(sql, params = [], recurringRescheduled = false) {
+  if (recurringRescheduled) return false;
+
+  const tipId = getCompletedStatusTipId(sql, params);
+  if (!tipId) return false;
+
+  db.run('UPDATE tips SET last_completed_at = ? WHERE id = ?', [new Date().toISOString(), tipId]);
+  return true;
+}
+
+function canShowPopupForTip(tip) {
+  if (!tip || tip.isRetiredCheck) return true;
+  const budget = getNotificationBudget();
+  const now = Date.now();
+  const importance = Number(tip.importance || 1);
+
+  if (importance < 9 && (isFullscreenActive() || isGameModeActive())) {
+    return false;
+  }
+
+  if (importance < 10 && isQuietHoursActive(budget)) {
+    return false;
+  }
+
+  if (tip.last_shown && now - Number(tip.last_shown) < budget.sameTaskCooldownMinutes * 60 * 1000) {
+    return false;
+  }
+
+  const lastPopup = db.get(`
+    SELECT MAX(last_shown) as last_shown
+    FROM tips
+    WHERE last_shown IS NOT NULL AND archived_at IS NULL
+  `);
+  if (importance < 10 && lastPopup?.last_shown && now - Number(lastPopup.last_shown) < budget.minimumPopupIntervalMinutes * 60 * 1000) {
+    return false;
+  }
+
+  const recent = db.get(`
+    SELECT COUNT(*) as count
+    FROM tips
+    WHERE last_shown IS NOT NULL AND archived_at IS NULL AND last_shown >= ?
+  `, [now - 60 * 60 * 1000]);
+  if (importance < 10 && recent && recent.count >= budget.maxPopupsPerHour) {
+    return false;
+  }
+
+  return true;
+}
+
+function selectTipFromCategory(categoryId) {
+  const budget = getNotificationBudget();
+  const cooldownAgo = Date.now() - (budget.sameTaskCooldownMinutes * 60 * 1000);
+
+  // Get active tips from this category, excluding recently shown or snoozed notes.
   const tips = db.query(`
     SELECT t.*, c.name as category_name, c.color as category_color
     FROM tips t
     JOIN categories c ON t.category_id = c.id
     WHERE t.category_id = ?
       AND t.status = 'active'
+      AND t.archived_at IS NULL
+      AND (t.next_due_at IS NULL OR t.next_due_at <= ?)
       AND (t.last_shown IS NULL OR t.last_shown < ?)
-  `, [categoryId, oneHourAgo]);
+      AND (t.snoozed_until IS NULL OR t.snoozed_until < ?)
+  `, [categoryId, new Date().toISOString(), cooldownAgo, new Date().toISOString()]);
 
   if (tips.length === 0) {
     // No active tips available, check for retired tips
@@ -507,6 +821,7 @@ function selectTipFromCategory(categoryId) {
       JOIN categories c ON t.category_id = c.id
       WHERE t.category_id = ?
         AND t.status = 'retired'
+        AND t.archived_at IS NULL
     `, [categoryId]);
 
     if (retiredTips.length === 0) {
@@ -522,23 +837,17 @@ function selectTipFromCategory(categoryId) {
     };
   }
 
-  // Importance-weighted random selection
-  // Higher importance = higher chance of being selected
-  const totalImportance = tips.reduce((sum, tip) => sum + tip.importance, 0);
-  let random = Math.random() * totalImportance;
-
-  for (const tip of tips) {
-    random -= tip.importance;
-    if (random <= 0) {
-      return tip;
-    }
-  }
-
-  // Fallback to random if weighting fails
-  return tips[Math.floor(Math.random() * tips.length)];
+  return tips
+    .map(tip => ({ ...tip, score: calculateTipScore(tip) }))
+    .sort((a, b) => b.score - a.score)[0];
 }
 
 function showPopupWithTip(tip, category) {
+  if (!canShowPopupForTip(tip)) {
+    console.log('[NotificationBudget] Popup suppressed by budget rules', { tipId: tip && tip.id });
+    return false;
+  }
+
   const tipData = {
     id: tip.id,
     tipId: tip.id,
@@ -551,7 +860,7 @@ function showPopupWithTip(tip, category) {
     isRetiredCheck: tip.isRetiredCheck || false
   };
 
-  enqueuePopup({
+  return enqueuePopup({
     channel: 'show-tip',
     data: tipData,
     markShownTipId: tip.isRetiredCheck ? null : tip.id,
@@ -589,10 +898,12 @@ function showRandomPopup() {
     FROM tips t
     JOIN categories c ON t.category_id = c.id
     WHERE t.status = 'active'
+      AND t.archived_at IS NULL
+      AND (t.next_due_at IS NULL OR t.next_due_at <= ?)
       AND (t.last_shown IS NULL OR t.last_shown < ?)
   `;
 
-  let params = [oneHourAgo];
+  let params = [new Date().toISOString(), oneHourAgo];
 
   // If focus mode is active, only select tips from focus category
   if (focusMode) {
@@ -618,6 +929,8 @@ function showRandomPopup() {
 app.whenReady().then(async () => {
   await initApp();
   createTray();
+  const quickCaptureRegistered = globalShortcut.register('Control+Alt+N', showQuickCaptureWindow);
+  console.log(`[QuickCapture] Ctrl+Alt+N shortcut ${quickCaptureRegistered ? 'registered' : 'could not be registered'}`);
   startWindowTitleTracking();
   startRandomPopupTracking();
 
@@ -648,6 +961,12 @@ app.on('before-quit', () => {
   // Cleanup before quit
   if (titleCheckInterval) clearInterval(titleCheckInterval);
   if (randomPopupInterval) clearTimeout(randomPopupInterval);
+  if (markdownWatchDebounce) clearTimeout(markdownWatchDebounce);
+  if (markdownWatcher) {
+    markdownWatcher.close();
+    markdownWatcher = null;
+  }
+  globalShortcut.unregisterAll();
   if (db) {
     db.close();
   }
@@ -715,13 +1034,38 @@ function categoryColorForName(name) {
 
 function findOrCreateCategory(name) {
   const existing = db.get('SELECT id FROM categories WHERE name = ? ORDER BY id LIMIT 1', [name]);
-  if (existing) return existing.id;
+  if (existing) {
+    ensureGeneralSubcategory(existing.id);
+    return existing.id;
+  }
 
   const result = db.run(
     'INSERT INTO categories (name, color, triggers, created_at) VALUES (?, ?, ?, ?)',
     [name, categoryColorForName(name), JSON.stringify({ apps: [], keywords: [] }), Date.now()]
   );
+  ensureGeneralSubcategory(result.lastID);
   return result.lastID;
+}
+
+function ensureGeneralSubcategory(categoryId) {
+  if (!categoryId) return null;
+
+  const existing = db.get(
+    "SELECT id FROM subcategories WHERE category_id = ? AND lower(name) = lower('Genel') ORDER BY id LIMIT 1",
+    [categoryId]
+  );
+  if (existing) return existing.id;
+
+  const result = db.run(
+    'INSERT INTO subcategories (category_id, name, order_index) VALUES (?, ?, ?)',
+    [categoryId, 'Genel', 0]
+  );
+  return result.lastID;
+}
+
+function ensureGeneralSubcategoriesForAll() {
+  const rows = db.query('SELECT id FROM categories ORDER BY id ASC');
+  rows.forEach(category => ensureGeneralSubcategory(category.id));
 }
 
 function findOrCreateSubcategory(categoryId, name) {
@@ -787,6 +1131,7 @@ function importMarkdownContent(markdown) {
     notifyDataUpdated('categories');
     notifyDataUpdated('tips');
     updateTrayMenu();
+    syncMarkdownStorageSafe('markdown-import');
     return { success: true, imported };
   } catch (error) {
     db.exec('ROLLBACK');
@@ -811,14 +1156,37 @@ ipcMain.handle('db-run', async (event, sql, params) => {
   try {
     const result = db.run(sql, params);
     console.log('DEBUG: main.js db-run result', result);
+    const recurringRescheduled = maybeApplyRecurringCompletion(sql, params);
+    const completionTimestamped = markCompletionTimestampIfNeeded(sql, params, recurringRescheduled);
 
     // Check if it's a mutation and notify data updated
     const sqlUpper = sql.toUpperCase();
+    if (sqlUpper.includes('INSERT INTO CATEGORIES')) {
+      ensureGeneralSubcategory(result.lastID);
+    }
+    if (sqlUpper.includes('DELETE FROM SUBCATEGORIES')) {
+      ensureGeneralSubcategoriesForAll();
+    }
+
     if (sqlUpper.includes('DELETE FROM CATEGORIES') || sqlUpper.includes('UPDATE CATEGORIES') || sqlUpper.includes('INSERT INTO CATEGORIES')) {
       notifyDataUpdated('categories');
     }
     if (sqlUpper.includes('DELETE FROM TIPS') || sqlUpper.includes('UPDATE TIPS') || sqlUpper.includes('INSERT INTO TIPS')) {
-      notifyDataUpdated('tips');
+      notifyDataUpdated('tips', recurringRescheduled || completionTimestamped
+        ? { recurringRescheduled, completionTimestamped }
+        : {}
+      );
+    }
+    if (sqlUpper.includes('DELETE FROM CATEGORIES') ||
+        sqlUpper.includes('UPDATE CATEGORIES') ||
+        sqlUpper.includes('INSERT INTO CATEGORIES') ||
+        sqlUpper.includes('DELETE FROM TIPS') ||
+        sqlUpper.includes('UPDATE TIPS') ||
+        sqlUpper.includes('INSERT INTO TIPS') ||
+        sqlUpper.includes('DELETE FROM SUBCATEGORIES') ||
+        sqlUpper.includes('UPDATE SUBCATEGORIES') ||
+        sqlUpper.includes('INSERT INTO SUBCATEGORIES')) {
+      syncMarkdownStorageSafe('db-run');
     }
 
     return result;
@@ -857,13 +1225,49 @@ ipcMain.handle('import-markdown-file', async () => {
   }
 });
 
-ipcMain.handle('popup-resize', async (event, contentHeight) => {
+ipcMain.handle('markdown-refresh', async () => {
+  try {
+    const result = markdownStorage.syncFromDatabase(db, 'manual-refresh');
+    return { success: true, root: result.root };
+  } catch (error) {
+    console.error('Error refreshing markdown storage:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('markdown-read-back', async () => {
+  try {
+    const result = markdownStorage.readBackToDatabase(db, 'manual-read-back');
+    syncMarkdownStorageSafe('after-read-back');
+    notifyDataUpdated('categories');
+    notifyDataUpdated('tips');
+    updateTrayMenu();
+    return { success: true, ...result };
+  } catch (error) {
+    console.error('Error reading markdown storage:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('popup-resize', async (event, contentHeight, options = {}) => {
   try {
     if (!popupWindow) return { success: false };
-    const MIN_HEIGHT = 450;
-    const MAX_HEIGHT = 650;
-    const clamped = Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, Math.round(contentHeight)));
-    popupWindow.setSize(400, clamped);
+    const isTimerMode = options && options.mode === 'timer';
+    const width = isTimerMode ? 240 : 400;
+    const minHeight = isTimerMode ? 132 : 450;
+    const maxHeight = isTimerMode ? 180 : 650;
+    const clamped = Math.min(maxHeight, Math.max(minHeight, Math.round(contentHeight)));
+    popupWindow.setSize(width, clamped);
+
+    if (isTimerMode) {
+      const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+      const workArea = display.workArea;
+      popupWindow.setPosition(
+        workArea.x + workArea.width - width - 16,
+        workArea.y + 16
+      );
+    }
+
     return { success: true };
   } catch (error) {
     console.error('Error in popup-resize:', error);
@@ -875,6 +1279,7 @@ ipcMain.handle('category-delete', async (event, id) => {
   try {
     const result = db.run(`DELETE FROM categories WHERE id = ?`, [id]);
     notifyDataUpdated('categories');
+    syncMarkdownStorageSafe('category-delete');
     return { success: true, result };
   } catch (error) {
     console.error('Error in category-delete:', error);
@@ -928,6 +1333,7 @@ ipcMain.handle('snooze-apply', async (event, tipId, reason) => {
     if (reason === 'not_today' || reason === 'no_motivation') durationHours = 24;
     else if (reason === 'remind_1h') durationHours = 1;
     else if (reason === 'not_now') durationHours = 2;
+    else if (reason === 'task_too_big' || reason === 'unclear') durationHours = 24;
 
     const snoozedUntil = new Date(Date.now() + durationHours * 3600000).toISOString();
 
@@ -943,8 +1349,21 @@ ipcMain.handle('snooze-apply', async (event, tipId, reason) => {
       db.run('UPDATE tips SET importance = MIN(importance + 1, 10) WHERE id = ?', [tipId]);
     }
 
+    const problemReasons = ['not_today', 'no_motivation', 'not_now', 'task_too_big', 'unclear'];
+    if (problemReasons.includes(reason)) {
+      const problemCount = db.get(`
+        SELECT COUNT(*) as count
+        FROM dismiss_log
+        WHERE tip_id = ? AND reason IN ('not_today', 'no_motivation', 'not_now', 'task_too_big', 'unclear')
+      `, [tipId]);
+      if (problemCount && problemCount.count >= 3) {
+        db.run('UPDATE tips SET needs_review = 1 WHERE id = ?', [tipId]);
+      }
+    }
+
     db.exec('COMMIT');
     notifyDataUpdated('tips');
+    syncMarkdownStorageSafe('snooze-apply');
     return { success: true };
   } catch (error) {
     db.exec('ROLLBACK');
@@ -994,6 +1413,41 @@ ipcMain.handle('show-settings', async () => {
     return { success: true };
   } catch (error) {
     console.error('Error in show-settings:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('quick-capture-save', async (event, content) => {
+  try {
+    const text = String(content || '').trim();
+    if (!text) {
+      return { success: false, error: 'Not içeriği boş olamaz.' };
+    }
+
+    const categoryId = findOrCreateCategory('Yapılacaklar');
+    const maxOrder = db.get(
+      'SELECT COALESCE(MAX(order_index), 0) as max_order FROM tips WHERE category_id = ? AND subcategory_id IS NULL',
+      [categoryId]
+    );
+
+    const result = db.run(
+      `INSERT INTO tips (category_id, content, importance, show_count, status, last_shown, created_at, subcategory_id, order_index, focus_duration)
+       VALUES (?, ?, 5, 0, 'active', NULL, ?, NULL, ?, 5)`,
+      [categoryId, text, Date.now(), (maxOrder ? maxOrder.max_order : 0) + 1]
+    );
+
+    notifyDataUpdated('categories');
+    notifyDataUpdated('tips');
+    updateTrayMenu();
+    syncMarkdownStorageSafe('quick-capture');
+
+    if (quickCaptureWindow) {
+      quickCaptureWindow.hide();
+    }
+
+    return { success: true, id: result.lastID };
+  } catch (error) {
+    console.error('Error in quick-capture-save:', error);
     return { success: false, error: error.message };
   }
 });
@@ -1285,6 +1739,7 @@ ipcMain.handle('subcategory-create', async (event, categoryId, name, orderIndex)
   try {
     db.run('INSERT INTO subcategories (category_id, name, order_index) VALUES (?, ?, ?)', [categoryId, name, orderIndex]);
     notifyDataUpdated('categories');
+    syncMarkdownStorageSafe('subcategory-create');
     return { success: true };
   } catch (error) {
     console.error('Error creating subcategory:', error);
@@ -1296,6 +1751,7 @@ ipcMain.handle('subcategory-update', async (event, id, name) => {
   try {
     db.run('UPDATE subcategories SET name = ? WHERE id = ?', [name, id]);
     notifyDataUpdated('categories');
+    syncMarkdownStorageSafe('subcategory-update');
     return { success: true };
   } catch (error) {
     console.error('Error updating subcategory:', error);
@@ -1307,7 +1763,10 @@ ipcMain.handle('subcategory-delete', async (event, id) => {
   try {
     db.run('DELETE FROM subcategories WHERE id = ?', [id]);
     db.run('UPDATE tips SET subcategory_id = NULL WHERE subcategory_id = ?', [id]);
+    ensureGeneralSubcategoriesForAll();
     notifyDataUpdated('categories');
+    notifyDataUpdated('tips');
+    syncMarkdownStorageSafe('subcategory-delete');
     return { success: true };
   } catch (error) {
     console.error('Error deleting subcategory:', error);
