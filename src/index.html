@@ -568,43 +568,43 @@
               </div>
 
               <!-- Group 3: Pencere Takip & Check-in -->
-              <div class="dev-tool-card">
+              <div class="dev-tool-card tracking-check-card">
                 <h3>Pencere Takip & Check-in</h3>
                 
-                <div class="dev-tool-item">
+                <div class="dev-tool-item tracking-status-panel">
                   <label>Aktif Pencere Takip Durumu</label>
-                  <div class="dev-tool-controls" style="align-items: center; gap: var(--spacing-sm); margin-bottom: var(--spacing-xs);">
+                  <div class="tracking-actions-row">
                     <button id="dev-get-active-window-btn" class="btn-secondary">Sorgula</button>
-                    <span id="dev-active-window-display" style="font-size: var(--font-size-sm); color: var(--text-muted); font-family: monospace; display: none;">-</span>
+                    <span id="dev-active-window-display" class="tracking-hidden-output">-</span>
                   </div>
-                  <div style="display: flex; flex-direction: column; gap: var(--spacing-sm);">
-                    <div class="form-group" style="margin-bottom: 0;">
-                      <label style="font-size: 11px; font-weight: 500; color: var(--text-secondary);">Yakalanan pencere</label>
-                      <input type="text" id="dev-captured-window" readonly value="-" style="width: 100%; padding: 6px var(--spacing-sm); border: 1px solid var(--border); border-radius: var(--border-radius-sm); background: var(--bg-secondary); color: var(--text-primary); font-family: monospace; font-size: 13px;">
+                  <div class="tracking-fields-grid">
+                    <div class="tracking-field">
+                      <label>Yakalanan pencere</label>
+                      <input type="text" id="dev-captured-window" readonly value="-">
                     </div>
-                    <div class="form-group" style="margin-bottom: 0;">
-                      <label style="font-size: 11px; font-weight: 500; color: var(--text-secondary);">Eşleşen kategori</label>
-                      <input type="text" id="dev-matching-category" readonly value="-" style="width: 100%; padding: 6px var(--spacing-sm); border: 1px solid var(--border); border-radius: var(--border-radius-sm); background: var(--bg-secondary); color: var(--text-primary); font-family: monospace; font-size: 13px;">
+                    <div class="tracking-field">
+                      <label>Eşleşen kategori</label>
+                      <input type="text" id="dev-matching-category" readonly value="-">
                     </div>
                   </div>
                 </div>
 
-                <div class="dev-tool-item">
+                <div class="dev-tool-item tracking-interval-panel">
                   <label>Takip Interval Testi</label>
-                  <div class="dev-tool-controls" style="align-items: center; gap: var(--spacing-sm); margin-bottom: var(--spacing-sm);">
-                    <button id="dev-start-popup-interval-btn" class="btn-primary" style="padding: 6px 12px;">🔴 Başlat</button>
-                    <button id="dev-stop-popup-interval-btn" class="btn-secondary" style="padding: 6px 12px;" disabled>⏹ Durdur</button>
+                  <div class="tracking-actions-row two-actions">
+                    <button id="dev-start-popup-interval-btn" class="btn-primary">Başlat</button>
+                    <button id="dev-stop-popup-interval-btn" class="btn-secondary" disabled>Durdur</button>
                   </div>
-                  <div id="dev-popup-interval-status" style="font-size: var(--font-size-sm); color: var(--text-muted); font-weight: 500;">
+                  <div id="dev-popup-interval-status" class="tracking-status-text">
                     0 popup tetiklendi
                   </div>
                 </div>
 
-                <div class="dev-tool-item">
+                <div class="dev-tool-item tracking-checkin-panel">
                   <label>Check-in Yönetimi</label>
-                  <div style="display: flex; gap: var(--spacing-sm); margin-top: 4px;">
-                    <button id="dev-reset-checkin" class="btn-secondary" style="flex: 1; padding: 6px;">Sıfırla</button>
-                    <button id="dev-trigger-checkin-popup" class="btn-secondary" style="flex: 1; padding: 6px;">Tetikle</button>
+                  <div class="tracking-actions-row two-actions">
+                    <button id="dev-reset-checkin" class="btn-secondary">Sıfırla</button>
+                    <button id="dev-trigger-checkin-popup" class="btn-secondary">Tetikle</button>
                   </div>
                 </div>
               </div>

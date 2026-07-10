@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   audioSetVolume: (volume) => ipcRenderer.invoke('audio-set-volume', volume),
   getAudioSettings: () => ipcRenderer.invoke('get-audio-settings'),
   getPopupQueue: () => ipcRenderer.invoke('get-popup-queue'),
+  getPopupDebugState: () => ipcRenderer.invoke('get-popup-debug-state'),
 
   // Audio control listeners (SFX only)
   onAudioFadeIn: (callback) => ipcRenderer.on('audio-fade-in', () => callback()),
@@ -101,6 +102,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   subcategoryReorderTips: (params) => ipcRenderer.invoke('subcategory-reorder-tips', params),
 
   debugSetCheckinMissed: () => ipcRenderer.invoke('debug-set-checkin-missed'),
+  debugTriggerCheckinPopup: () => ipcRenderer.invoke('debug-trigger-checkin-popup'),
   debugSimulateDeadline: (type, id, daysFromNow) => ipcRenderer.invoke('debug-simulate-deadline', type, id, daysFromNow),
   debugResetSnoozeLimits: () => ipcRenderer.invoke('debug-reset-snooze-limits'),
   debugGetActiveWindow: () => ipcRenderer.invoke('debug-get-active-window'),
@@ -109,6 +111,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Listen for debug popup count updates from main process
   onDebugPopupCountUpdate: (callback) => ipcRenderer.on('debug-popup-count-update', (_event, data) => callback(data)),
+  onPopupDebugUpdated: (callback) => ipcRenderer.on('popup-debug-updated', (_event, data) => callback(data)),
 
   // SFX trigger events from main process
   onPopupSfxTrigger: (callback) => ipcRenderer.on('popup-sfx-trigger', (_event) => callback()),

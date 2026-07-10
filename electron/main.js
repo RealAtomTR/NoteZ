@@ -17,6 +17,8 @@ let popupQueuedKeys = new Set();
 let activePopupKey = null;
 let titleCheckInterval = null;
 let randomPopupInterval = null;
+let debugPopupInterval = null;
+let debugPopupCount = 0;
 let lastShownTips = new Map(); // Track tips shown in last hour
 let audioSettings = null; // Cache audio settings
 let currentTipForTimer = null; // Store tip data for timer follow-up
@@ -26,6 +28,17 @@ let markdownWatcher = null;
 let markdownWatchDebounce = null;
 let lastMarkdownWriteAt = 0;
 let isApplyingMarkdownReadBack = false;
+let popupDebugState = {
+  activeWindow: null,
+  lastTrackedMatch: null,
+  nextTrigger: null,
+  lastScoring: null,
+  lastCandidate: null,
+  lastSuppression: null,
+  activePopupKey: null,
+  queueLength: 0,
+  updatedAt: null
+};
 
 // Initialize database (async)
 async function initApp() {
@@ -103,7 +116,101 @@ function loadAudioSettings() {
   }
 }
 
+function updatePopupDebugState(patch = {}) {
+  popupDebugState = {
+    ...popupDebugState,
+    ...patch,
+    activePopupKey,
+    queueLength: popupQueue.length,
+    updatedAt: new Date().toISOString()
+  };
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('popup-debug-updated', getPopupDebugStateSnapshot());
+  }
+}
+
+function summarizeTipForDebug(tip) {
+  if (!tip) return null;
+  return {
+    id: tip.id,
+    categoryId: tip.category_id,
+    categoryName: tip.category_name,
+    content: tip.content,
+    importance: tip.importance,
+    status: tip.status,
+    deadline: tip.deadline || null,
+    tipTrackingApp: tip.tip_tracking_app || null,
+    score: tip.score !== undefined ? tip.score : calculateTipScore(tip)
+  };
+}
+
+function normalizeActiveWindow(activeWindow, source) {
+  if (!activeWindow) return null;
+
+  const title = String(activeWindow.title || '').trim();
+  const processName = activeWindow.owner && activeWindow.owner.name
+    ? String(activeWindow.owner.name).trim()
+    : 'Unknown';
+
+  return {
+    title,
+    owner: processName,
+    process: processName,
+    label: title ? `${processName} — ${title}` : processName,
+    checkedAt: new Date().toISOString(),
+    source
+  };
+}
+
+function getPopupDebugStateSnapshot() {
+  const queuedItems = popupQueue.map(item => ({
+    key: item.key,
+    channel: item.channel,
+    tipId: item.data && (item.data.tipId || item.data.id),
+    content: item.data && item.data.content,
+    importance: item.data && item.data.importance,
+    tipTrackingApp: item.data && (item.data.tipTrackingApp || item.data.tip_tracking_app),
+    score: item.data && item.data.score !== undefined ? item.data.score : null
+  }));
+  const scoredCandidate = popupDebugState.lastScoring && popupDebugState.lastScoring.selected
+    ? popupDebugState.lastScoring.selected
+    : null;
+  const nextPopup = queuedItems[0]
+    || (popupDebugState.lastCandidate && popupDebugState.lastCandidate.data)
+    || scoredCandidate
+    || null;
+  const nextTrigger = popupDebugState.nextTrigger || {};
+  const triggerTime = nextTrigger.debugPopupNextAt || nextTrigger.randomPopupAt || null;
+
+  return {
+    ...popupDebugState,
+    activePopupKey,
+    queueLength: popupQueue.length,
+    queuedItems,
+    trackedApplication: popupDebugState.lastTrackedMatch || popupDebugState.activeWindow,
+    nextPopup,
+    triggerTime,
+    queueScore: nextPopup && nextPopup.score !== undefined && nextPopup.score !== null
+      ? nextPopup.score
+      : (scoredCandidate ? scoredCandidate.score : null)
+  };
+}
+
+function getLocalDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 function createCheckinWindow() {
+  if (checkinWindow && !checkinWindow.isDestroyed()) {
+    checkinWindow.show();
+    checkinWindow.focus();
+    return checkinWindow;
+  }
+
   checkinWindow = new BrowserWindow({
     width: 400,
     height: 500,
@@ -111,8 +218,8 @@ function createCheckinWindow() {
     frame: false,
     resizable: false,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
       preload: path.join(__dirname, 'preload.js')
     }
   });
@@ -125,6 +232,20 @@ function createCheckinWindow() {
   checkinWindow.on('closed', () => {
     checkinWindow = null;
   });
+
+  return checkinWindow;
+}
+
+function showCheckinWindowIfNeeded() {
+  const dateStr = getLocalDateKey();
+  const todayCheckin = db.query('SELECT completed FROM checkins WHERE date = ?', [dateStr]);
+  const isCompleted = todayCheckin.length > 0 && Number(todayCheckin[0].completed) === 1;
+
+  if (!isCompleted) {
+    createCheckinWindow();
+  }
+
+  return !isCompleted;
 }
 
 function createMainWindow() {
@@ -187,6 +308,7 @@ function createPopupWindow() {
     popupWindow = null;
     pendingTipData = null;
     activePopupKey = null;
+    updatePopupDebugState({ activePopupKey: null });
     setImmediate(showNextPopupFromQueue);
   });
 
@@ -252,11 +374,13 @@ function enqueuePopup(item) {
   queuedItem.key = getPopupKey({ ...queuedItem, key: item.key });
 
   if (popupQueuedKeys.has(queuedItem.key) || activePopupKey === queuedItem.key) {
+    updatePopupDebugState({ lastSuppression: { reason: 'duplicate-popup-key', key: queuedItem.key } });
     return false;
   }
 
   popupQueuedKeys.add(queuedItem.key);
   popupQueue.push(queuedItem);
+  updatePopupDebugState({ lastCandidate: { key: queuedItem.key, channel: queuedItem.channel, data: queuedItem.data } });
   showNextPopupFromQueue();
   return true;
 }
@@ -265,6 +389,7 @@ function sendPopupItem(win, item) {
   if (!win || win.isDestroyed()) return;
 
   activePopupKey = item.key;
+  updatePopupDebugState({ activePopupKey });
   pendingTipData = item.channel === 'show-tip' ? item.data : null;
 
   if (item.markShownTipId) {
@@ -288,6 +413,7 @@ function showNextPopupFromQueue() {
 
   const item = popupQueue.shift();
   popupQueuedKeys.delete(item.key);
+  updatePopupDebugState({ lastCandidate: { key: item.key, channel: item.channel, data: item.data } });
 
   const win = createPopupWindow();
   if (!win) return;
@@ -527,10 +653,10 @@ async function checkWindowTitle() {
       return;
     }
 
-    lastActiveProcessName = activeWindow.owner && activeWindow.owner.name
-      ? String(activeWindow.owner.name).toLowerCase()
-      : '';
-    const windowTitle = activeWindow.title.toLowerCase();
+    const activeWindowData = normalizeActiveWindow(activeWindow, 'window-title-tracking');
+    lastActiveProcessName = activeWindowData.process.toLowerCase();
+    const windowTitle = activeWindowData.title.toLowerCase();
+    updatePopupDebugState({ activeWindow: activeWindowData });
 
     // Get all categories with their triggers
     const categories = db.query(`
@@ -567,6 +693,19 @@ async function checkWindowTitle() {
       );
 
       if (match) {
+        updatePopupDebugState({
+          lastTrackedMatch: {
+            categoryId: category.id,
+            categoryName: category.name,
+            triggers,
+            windowTitle: activeWindowData.title,
+            owner: activeWindowData.owner,
+            process: activeWindowData.process,
+            label: activeWindowData.label,
+            matchedAt: new Date().toISOString()
+          }
+        });
+
         // Select a tip from this category
         const tip = selectTipFromCategory(category.id);
 
@@ -764,14 +903,17 @@ function canShowPopupForTip(tip) {
   const importance = Number(tip.importance || 1);
 
   if (importance < 9 && (isFullscreenActive() || isGameModeActive())) {
+    updatePopupDebugState({ lastSuppression: { reason: 'fullscreen-or-game-mode', tip: summarizeTipForDebug(tip) } });
     return false;
   }
 
   if (importance < 10 && isQuietHoursActive(budget)) {
+    updatePopupDebugState({ lastSuppression: { reason: 'quiet-hours', tip: summarizeTipForDebug(tip) } });
     return false;
   }
 
   if (tip.last_shown && now - Number(tip.last_shown) < budget.sameTaskCooldownMinutes * 60 * 1000) {
+    updatePopupDebugState({ lastSuppression: { reason: 'same-task-cooldown', tip: summarizeTipForDebug(tip) } });
     return false;
   }
 
@@ -781,6 +923,7 @@ function canShowPopupForTip(tip) {
     WHERE last_shown IS NOT NULL AND archived_at IS NULL
   `);
   if (importance < 10 && lastPopup?.last_shown && now - Number(lastPopup.last_shown) < budget.minimumPopupIntervalMinutes * 60 * 1000) {
+    updatePopupDebugState({ lastSuppression: { reason: 'minimum-popup-interval', tip: summarizeTipForDebug(tip) } });
     return false;
   }
 
@@ -790,6 +933,7 @@ function canShowPopupForTip(tip) {
     WHERE last_shown IS NOT NULL AND archived_at IS NULL AND last_shown >= ?
   `, [now - 60 * 60 * 1000]);
   if (importance < 10 && recent && recent.count >= budget.maxPopupsPerHour) {
+    updatePopupDebugState({ lastSuppression: { reason: 'max-popups-per-hour', tip: summarizeTipForDebug(tip), recentCount: recent.count } });
     return false;
   }
 
@@ -837,9 +981,23 @@ function selectTipFromCategory(categoryId) {
     };
   }
 
-  return tips
+  const scoredTips = tips
     .map(tip => ({ ...tip, score: calculateTipScore(tip) }))
-    .sort((a, b) => b.score - a.score)[0];
+    .sort((a, b) => b.score - a.score);
+  const selectedTip = scoredTips[0];
+
+  updatePopupDebugState({
+    lastScoring: {
+      source: 'category-title-match',
+      categoryId,
+      candidateCount: scoredTips.length,
+      selected: summarizeTipForDebug(selectedTip),
+      candidates: scoredTips.slice(0, 10).map(summarizeTipForDebug),
+      scoredAt: new Date().toISOString()
+    }
+  });
+
+  return selectedTip;
 }
 
 function showPopupWithTip(tip, category) {
@@ -878,6 +1036,14 @@ function scheduleRandomPopup() {
   const minInterval = focusMode ? 15 * 60 * 1000 : 30 * 60 * 1000;
   const maxInterval = focusMode ? 45 * 60 * 1000 : 90 * 60 * 1000;
   const randomInterval = Math.floor(Math.random() * (maxInterval - minInterval + 1)) + minInterval;
+  updatePopupDebugState({
+    nextTrigger: {
+      randomPopupAt: new Date(Date.now() + randomInterval).toISOString(),
+      randomIntervalMs: randomInterval,
+      titleCheckIntervalMs: focusMode ? 2500 : 5000,
+      focusMode: focusMode ? { categoryId: focusMode.categoryId, categoryName: focusMode.categoryName } : null
+    }
+  });
 
   randomPopupInterval = setTimeout(() => {
     // Check if fullscreen is active before showing
@@ -916,7 +1082,16 @@ function showRandomPopup() {
   const tips = db.query(query, params);
 
   if (tips.length > 0) {
-    const tip = tips[0];
+    const tip = { ...tips[0], score: calculateTipScore(tips[0]) };
+    updatePopupDebugState({
+      lastScoring: {
+        source: 'random-popup',
+        candidateCount: tips.length,
+        selected: summarizeTipForDebug(tip),
+        candidates: [summarizeTipForDebug(tip)],
+        scoredAt: new Date().toISOString()
+      }
+    });
     const category = {
       name: tip.category_name,
       color: tip.category_color
@@ -929,6 +1104,7 @@ function showRandomPopup() {
 app.whenReady().then(async () => {
   await initApp();
   createTray();
+  showCheckinWindowIfNeeded();
   const quickCaptureRegistered = globalShortcut.register('Control+Alt+N', showQuickCaptureWindow);
   console.log(`[QuickCapture] Ctrl+Alt+N shortcut ${quickCaptureRegistered ? 'registered' : 'could not be registered'}`);
   startWindowTitleTracking();
@@ -961,6 +1137,7 @@ app.on('before-quit', () => {
   // Cleanup before quit
   if (titleCheckInterval) clearInterval(titleCheckInterval);
   if (randomPopupInterval) clearTimeout(randomPopupInterval);
+  if (debugPopupInterval) clearInterval(debugPopupInterval);
   if (markdownWatchDebounce) clearTimeout(markdownWatchDebounce);
   if (markdownWatcher) {
     markdownWatcher.close();
@@ -1618,8 +1795,7 @@ function notifyDataUpdated(type, data = {}) {
 
 // Check-in IPC handlers
 ipcMain.handle('checkin-status', async () => {
-  const today = new Date();
-  const dateStr = today.toISOString().split('T')[0];
+  const dateStr = getLocalDateKey();
   try {
     const todayCheckin = db.query('SELECT * FROM checkins WHERE date = ?', [dateStr]);
     const isCompleted = todayCheckin.length > 0 && todayCheckin[0].completed === 1;
@@ -1634,10 +1810,10 @@ ipcMain.handle('checkin-status', async () => {
 
 ipcMain.handle('checkin-do', async () => {
   const today = new Date();
-  const dateStr = today.toISOString().split('T')[0];
+  const dateStr = getLocalDateKey(today);
   const yesterday = new Date(today);
   yesterday.setDate(yesterday.getDate() - 1);
-  const yesterdayStr = yesterday.toISOString().split('T')[0];
+  const yesterdayStr = getLocalDateKey(yesterday);
 
   try {
     const todayCheckin = db.query('SELECT * FROM checkins WHERE date = ?', [dateStr]);
@@ -1666,7 +1842,7 @@ ipcMain.handle('checkin-do', async () => {
 ipcMain.handle('checkin-history', async () => {
   const today = new Date();
   today.setDate(today.getDate() - 30);
-  const thirtyDaysAgoStr = today.toISOString().split('T')[0];
+  const thirtyDaysAgoStr = getLocalDateKey(today);
   try {
     return db.query('SELECT date, completed, streak FROM checkins WHERE date >= ? ORDER BY date ASC', [thirtyDaysAgoStr]);
   } catch (error) {
@@ -1682,17 +1858,161 @@ ipcMain.handle('close-checkin', async () => {
 // Debug IPC handlers
 ipcMain.handle('get-popup-queue', async () => popupQueue);
 
+ipcMain.handle('get-popup-debug-state', async () => getPopupDebugStateSnapshot());
+
+ipcMain.handle('debug-start-popup-interval', async () => {
+  try {
+    if (debugPopupInterval) {
+      clearInterval(debugPopupInterval);
+    }
+
+    debugPopupCount = 0;
+    const intervalMs = 10000;
+    debugPopupInterval = setInterval(() => {
+      try {
+        debugPopupCount++;
+        updatePopupDebugState({
+          nextTrigger: {
+            ...(popupDebugState.nextTrigger || {}),
+            debugPopupIntervalMs: intervalMs,
+            debugPopupNextAt: new Date(Date.now() + intervalMs).toISOString(),
+            debugPopupCount
+          }
+        });
+        showRandomPopup();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('debug-popup-count-update', { count: debugPopupCount, intervalMs });
+        }
+      } catch (error) {
+        console.error('Error in debug popup interval tick:', error);
+        updatePopupDebugState({
+          lastSuppression: {
+            reason: 'debug-interval-error',
+            error: error.message,
+            failedAt: new Date().toISOString()
+          }
+        });
+      }
+    }, intervalMs);
+
+    updatePopupDebugState({
+      nextTrigger: {
+        ...(popupDebugState.nextTrigger || {}),
+        debugPopupIntervalMs: intervalMs,
+        debugPopupNextAt: new Date(Date.now() + intervalMs).toISOString(),
+        debugPopupCount
+      }
+    });
+
+    return { ok: true, success: true, running: true, intervalMs, count: debugPopupCount };
+  } catch (error) {
+    console.error('Error in debug-start-popup-interval:', error);
+    return { ok: false, success: false, running: false, error: error.message };
+  }
+});
+
+ipcMain.handle('debug-stop-popup-interval', async () => {
+  try {
+    if (debugPopupInterval) {
+      clearInterval(debugPopupInterval);
+      debugPopupInterval = null;
+    }
+
+    updatePopupDebugState({
+      nextTrigger: {
+        ...(popupDebugState.nextTrigger || {}),
+        debugPopupIntervalMs: null,
+        debugPopupNextAt: null,
+        debugPopupCount
+      }
+    });
+
+    return { ok: true, success: true, running: false, count: debugPopupCount };
+  } catch (error) {
+    console.error('Error in debug-stop-popup-interval:', error);
+    return { ok: false, success: false, running: Boolean(debugPopupInterval), error: error.message };
+  }
+});
+
+ipcMain.handle('debug-set-checkin-missed', async () => {
+  try {
+    const today = getLocalDateKey();
+    db.run('DELETE FROM checkins WHERE date = ?', [today]);
+    notifyDataUpdated('checkins');
+    syncMarkdownStorageSafe('debug-set-checkin-missed');
+    return { ok: true, success: true, date: today };
+  } catch (error) {
+    console.error('Error in debug-set-checkin-missed:', error);
+    return { ok: false, success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('debug-trigger-checkin-popup', async () => {
+  try {
+    const window = createCheckinWindow();
+    return { ok: true, success: true, visible: window.isVisible() };
+  } catch (error) {
+    console.error('Error in debug-trigger-checkin-popup:', error);
+    return { ok: false, success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('debug-simulate-deadline', async (event, type, id, daysFromNow) => {
+  try {
+    const days = Number(daysFromNow || 0);
+    const deadline = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+    const normalizedType = String(type || '').toLowerCase();
+
+    if (normalizedType === 'subcategory') {
+      db.run('UPDATE subcategories SET shared_deadline = ?, deadline_mode = ? WHERE id = ?', [deadline, 'shared', id]);
+      notifyDataUpdated('categories');
+    } else {
+      db.run('UPDATE tips SET deadline = ? WHERE id = ?', [deadline, id]);
+      notifyDataUpdated('tips');
+    }
+
+    syncMarkdownStorageSafe('debug-simulate-deadline');
+    return { ok: true, success: true, type: normalizedType || 'tip', id, deadline };
+  } catch (error) {
+    console.error('Error in debug-simulate-deadline:', error);
+    return { ok: false, success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('debug-reset-snooze-limits', async () => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    db.run(
+      `DELETE FROM dismiss_log
+       WHERE reason IN ('not_today','remind_1h','no_motivation','not_now','too_big','unclear')
+       AND dismissed_at >= ?`,
+      [today.getTime()]
+    );
+    db.run('UPDATE tips SET snoozed_until = NULL WHERE snoozed_until IS NOT NULL');
+    notifyDataUpdated('tips');
+    syncMarkdownStorageSafe('debug-reset-snooze-limits');
+    return { ok: true, success: true };
+  } catch (error) {
+    console.error('Error in debug-reset-snooze-limits:', error);
+    return { ok: false, success: false, error: error.message };
+  }
+});
+
 ipcMain.handle('debug-get-active-window', async () => {
   try {
     const activeWindow = await activeWin();
-    if (activeWindow) return { title: activeWindow.title, process: activeWindow.owner ? activeWindow.owner.name : 'Unknown' };
-    return null;
+    if (!activeWindow) return null;
+
+    const data = normalizeActiveWindow(activeWindow, 'debug-get-active-window');
+    lastActiveProcessName = data.process.toLowerCase();
+    updatePopupDebugState({ activeWindow: data });
+    return data;
   } catch (error) {
     console.error('Error getting active window:', error);
     return null;
   }
 });
-
 // Active Windows Handler
 ipcMain.handle('get-active-windows', async () => {
   return new Promise((resolve) => {

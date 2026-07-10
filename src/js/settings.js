@@ -140,11 +140,7 @@ function _stopCurrentTest() {
 // Use real SQLite data via IPC
 let categories = [];
 let tips = [];
-let noteHoverOpenTimer = null;
-let noteHoverCloseTimer = null;
-let subcategoryHoverTimer = null;
-const NOTE_HOVER_DELAY_MS = 650;
-const SUBCATEGORY_HOVER_DELAY_MS = 450;
+const descriptionSaveTimers = new Map();
 const notificationBudgetDefaults = {
   notification_max_popups_per_hour: '3',
   notification_minimum_popup_interval_minutes: '15',
@@ -173,12 +169,12 @@ function closeNoteMenus(exceptDropdown = null) {
   document.querySelectorAll('.note-menu-dropdown.show').forEach(dropdown => {
     if (dropdown === exceptDropdown) return;
     dropdown.classList.remove('show');
-    dropdown.closest('.tip-item')?.classList.remove('menu-open', 'menu-hover-open', 'menu-click-open');
+    dropdown.closest('.tip-item')?.classList.remove('menu-open', 'menu-click-open');
     dropdown.closest('.accordion-item')?.classList.remove('menu-open');
   });
 }
 
-function setNoteMenuOpen(dropdown, shouldOpen, source = 'manual') {
+function setNoteMenuOpen(dropdown, shouldOpen) {
   if (!dropdown) return;
   if (shouldOpen) {
     closeNoteMenus(dropdown);
@@ -186,80 +182,10 @@ function setNoteMenuOpen(dropdown, shouldOpen, source = 'manual') {
   const tipItem = dropdown.closest('.tip-item');
   dropdown.classList.toggle('show', shouldOpen);
   tipItem?.classList.toggle('menu-open', shouldOpen);
-  tipItem?.classList.toggle('menu-hover-open', shouldOpen && source === 'hover');
-  tipItem?.classList.toggle('menu-click-open', shouldOpen && source !== 'hover');
+  tipItem?.classList.toggle('menu-click-open', shouldOpen);
   dropdown.closest('.accordion-item')?.classList.toggle('menu-open', shouldOpen);
 }
 
-function clearNoteHoverState(tipItem) {
-  if (!tipItem) return;
-  tipItem.classList.remove('hover-loading', 'hover-ready');
-}
-
-function clearSubcategoryHoverState(item) {
-  if (!item) return;
-  item.classList.remove('subcategory-hover-loading', 'subcategory-hover-open');
-}
-
-function setupDelayedHoverMenus(root) {
-  if (!root || root.dataset.hoverMenusBound === 'true') return;
-  root.dataset.hoverMenusBound = 'true';
-
-  root.addEventListener('mouseover', (e) => {
-    const tipItem = e.target.closest('.tip-item');
-    if (tipItem && root.contains(tipItem) && !tipItem.contains(e.relatedTarget)) {
-      clearTimeout(noteHoverCloseTimer);
-      clearTimeout(noteHoverOpenTimer);
-      document.querySelectorAll('.tip-item.hover-ready, .tip-item.hover-loading').forEach(item => {
-        if (item !== tipItem) clearNoteHoverState(item);
-      });
-      tipItem.classList.add('hover-loading');
-      noteHoverOpenTimer = setTimeout(() => {
-        if (!tipItem.isConnected || tipItem.classList.contains('menu-open')) return;
-        tipItem.classList.remove('hover-loading');
-        const dropdown = tipItem.querySelector('.note-menu-dropdown');
-        if (dropdown) {
-          setNoteMenuOpen(dropdown, true, 'hover');
-        } else {
-          tipItem.classList.add('hover-ready');
-        }
-      }, NOTE_HOVER_DELAY_MS);
-    }
-
-    const accordionItem = e.target.closest('.accordion-item');
-    if (accordionItem && root.contains(accordionItem) && !accordionItem.contains(e.relatedTarget)) {
-      clearTimeout(subcategoryHoverTimer);
-      document.querySelectorAll('.accordion-item.subcategory-hover-open, .accordion-item.subcategory-hover-loading').forEach(item => {
-        if (item !== accordionItem) clearSubcategoryHoverState(item);
-      });
-      accordionItem.classList.add('subcategory-hover-loading');
-      subcategoryHoverTimer = setTimeout(() => {
-        if (!accordionItem.isConnected || accordionItem.classList.contains('menu-open')) return;
-        accordionItem.classList.remove('subcategory-hover-loading');
-        accordionItem.classList.add('subcategory-hover-open');
-      }, SUBCATEGORY_HOVER_DELAY_MS);
-    }
-  });
-
-  root.addEventListener('mouseout', (e) => {
-    const tipItem = e.target.closest('.tip-item');
-    if (tipItem && root.contains(tipItem) && !tipItem.contains(e.relatedTarget)) {
-      clearTimeout(noteHoverOpenTimer);
-      noteHoverCloseTimer = setTimeout(() => {
-        clearNoteHoverState(tipItem);
-        if (tipItem.classList.contains('menu-hover-open')) {
-          setNoteMenuOpen(tipItem.querySelector('.note-menu-dropdown'), false);
-        }
-      }, 120);
-    }
-
-    const accordionItem = e.target.closest('.accordion-item');
-    if (accordionItem && root.contains(accordionItem) && !accordionItem.contains(e.relatedTarget)) {
-      clearTimeout(subcategoryHoverTimer);
-      clearSubcategoryHoverState(accordionItem);
-    }
-  });
-}
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
   if (window.electronAPI && window.electronAPI.showPopup) {
@@ -324,11 +250,14 @@ async function checkAndAddFocusDurationColumn() {
     if (window.electronAPI && window.electronAPI.dbQuery && window.electronAPI.dbRun) {
       const tableInfo = await window.electronAPI.dbQuery("PRAGMA table_info(tips)");
       const hasFocusDuration = tableInfo.some(col => col.name === 'focus_duration');
+      const hasDescription = tableInfo.some(col => col.name === 'description');
       if (!hasFocusDuration) {
         await window.electronAPI.dbRun("ALTER TABLE tips ADD COLUMN focus_duration INTEGER DEFAULT 5");
         console.log('[DB] focus_duration column successfully added to tips table.');
-      } else {
-        console.log('[DB] focus_duration column already exists in tips table.');
+      }
+      if (!hasDescription) {
+        await window.electronAPI.dbRun("ALTER TABLE tips ADD COLUMN description TEXT DEFAULT ''");
+        console.log('[DB] description column successfully added to tips table.');
       }
     }
   } catch (err) {
@@ -514,7 +443,6 @@ async function loadAudioSettings() {
 function setupEventListeners() {
   // Use event delegation on main content wrapper
   const contentWrapper = document.querySelector('.content-wrapper');
-  setupDelayedHoverMenus(contentWrapper);
 
   contentWrapper.addEventListener('click', async (e) => {
     // Test popup button
@@ -762,16 +690,26 @@ function setupEventListeners() {
       deleteNote(tipId, btn);
     }
 
+    // Tip Row Dropdown Toggle Click
+    if (e.target.closest('.tip-item') && !e.target.closest('.note-menu-wrapper') && !e.target.closest('.note-menu-dropdown') && !e.target.closest('.status-ring') && !e.target.closest('.importance-box') && !e.target.closest('.calendar-btn') && !e.target.closest('.clear-deadline-x') && !e.target.closest('.delete-note-btn')) {
+      e.preventDefault();
+      e.stopPropagation();
+      const tipItem = e.target.closest('.tip-item');
+      const dropdown = tipItem.querySelector('.note-menu-dropdown');
+      if (dropdown) {
+        const shouldShow = !dropdown.classList.contains('show');
+        setNoteMenuOpen(dropdown, shouldShow);
+      }
+    }
     // Note Menu Dropdown Toggle Click
     if (e.target.closest('.note-menu-toggle-btn')) {
       e.preventDefault();
       e.stopPropagation();
       const btn = e.target.closest('.note-menu-toggle-btn');
-      const dropdown = btn.parentElement.querySelector('.note-menu-dropdown');
+      const dropdown = btn.closest('.tip-item')?.querySelector('.note-menu-dropdown');
       
       if (dropdown) {
         const shouldShow = !dropdown.classList.contains('show');
-        clearNoteHoverState(dropdown.closest('.tip-item'));
         setNoteMenuOpen(dropdown, shouldShow);
       }
     }
@@ -781,8 +719,8 @@ function setupEventListeners() {
       e.preventDefault();
       e.stopPropagation();
       const item = e.target.closest('.calendar-trigger-item');
-      const wrapper = item.closest('.note-menu-wrapper');
-      const dateInput = wrapper.querySelector('.inline-deadline-input');
+      const tipItem = item.closest('.tip-item');
+      const dateInput = tipItem?.querySelector('.inline-deadline-input');
       if (dateInput) {
         if (typeof dateInput.showPicker === 'function') {
           dateInput.showPicker();
@@ -846,6 +784,16 @@ function setupEventListeners() {
     }
   });
 
+  // Task detail description is edited only from its inline accordion panel.
+  contentWrapper.addEventListener('input', (e) => {
+    const input = e.target.closest('.note-description-input');
+    if (input) queueTipDescriptionSave(input);
+  });
+
+  contentWrapper.addEventListener('focusout', (e) => {
+    const input = e.target.closest('.note-description-input');
+    if (input) queueTipDescriptionSave(input, true);
+  });
   // Inline duration select change - delegated
   contentWrapper.addEventListener('change', async (e) => {
     if (e.target.closest('.inline-duration-select')) {
@@ -1169,7 +1117,7 @@ function setupEventListeners() {
 
   // Close note dropdowns when clicking outside
   document.addEventListener('click', (e) => {
-    if (!e.target.closest('.note-menu-wrapper')) {
+    if (!e.target.closest('.tip-item')) {
       closeNoteMenus();
     }
   });
@@ -2749,16 +2697,7 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
         
         const importanceTitle = effectiveImportance === tip.importance ? `Önem: ${tip.importance}` : `Önem: ${tip.importance} → ${effectiveImportance}`;
         const importanceBoxHtml = `<div class="importance-box ${impClass}" data-tip-id="${tip.id}" data-importance="${tip.importance}" title="${importanceTitle}">${effectiveImportance}</div>`;
-        const detailsHtml = `
-          <div class="note-details-card note-hover-dropdown" role="tooltip">
-            <div class="note-details-title">${escapeHtml(tip.content)}</div>
-            <div class="note-details-row"><span>Durum</span><strong>${getStatusText(tip.status)}</strong></div>
-            <div class="note-details-row"><span>Önem</span><strong>${effectiveImportance}/10</strong></div>
-            <div class="note-details-row"><span>Oluşturma</span><strong>${formatNoteDate(tip.created_at)}</strong></div>
-            <div class="note-details-row"><span>Deadline</span><strong>${formatNoteDate(tip.deadline)}</strong></div>
-            <div class="note-details-row"><span>Tekrar</span><strong>${getRecurringText(tip)}</strong></div>
-          </div>
-        `;
+
         
         const showCalendarIcon = sub.deadlineMode !== 'shared';
         const isExpired = tip.deadline && getRelativeDeadlineText(tip.deadline) === 'Geçti!';
@@ -2795,46 +2734,41 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
               ${deadlineBadgeHtml}
               ${chainBadgeHtml}
               ${blockedBadgeHtml}
-              ${detailsHtml}
             </div>
             <div class="step-controls">
               ${importanceBoxHtml}
               
               <div class="note-menu-wrapper">
                 <button class="note-menu-toggle-btn" data-tip-id="${tip.id}" title="İşlemler">›</button>
-                <div class="note-menu-dropdown" data-tip-id="${tip.id}">
-                  <div class="note-menu-summary">
-                    <div class="note-menu-description-label">Açıklama</div>
-                    <div class="note-menu-description">${escapeHtml(tip.content)}</div>
-                    <div class="note-menu-summary-row"><span>Durum</span><strong class="note-menu-summary-status">${getStatusText(tip.status)}</strong></div>
-                    <div class="note-menu-summary-row"><span>Önem</span><strong>${effectiveImportance}/10</strong></div>
-                    <div class="note-menu-summary-row"><span>Tekrar</span><strong>${getRecurringText(tip)}</strong></div>
-                  </div>
-                  <div class="dropdown-divider"></div>
-                  <button class="dropdown-item status-cycle-icon ${getStatusClass(tip.status)}" data-tip-id="${tip.id}" title="Durum: ${getStatusText(tip.status)}">${getStatusText(tip.status)}</button>
-                  <a class="dropdown-item calendar-trigger-item" data-tip-id="${tip.id}">📅 Tarih Belirle</a>
-                  
-                  ${tip.deadline ? `
-                    <a class="dropdown-item clear-deadline-item" data-tip-id="${tip.id}">❌ Tarihi Temizle</a>
-                  ` : ''}
-                  
-                  <div class="dropdown-divider"></div>
-                  <div class="dropdown-submenu-title">⏱ Süre Ayarla</div>
+              </div>
+            </div>
+            <section class="note-menu-dropdown task-detail-panel" data-tip-id="${tip.id}" aria-label="Not detayları">
+              <div class="task-detail-description">
+                <label class="note-menu-description-label" for="note-description-${tip.id}">Açıklama</label>
+                <textarea id="note-description-${tip.id}" class="note-description-input" data-tip-id="${tip.id}" placeholder="Bir Açıklama Yazın" aria-label="Açıklama">${escapeHtml(tip.description ?? '')}</textarea>
+              </div>
+              <div class="task-detail-meta">
+                <span>Durum <strong class="note-menu-summary-status">${getStatusText(tip.status)}</strong></span>
+                <span>Önem <strong>${effectiveImportance}/10</strong></span>
+                <span>Tekrar <strong>${getRecurringText(tip)}</strong></span>
+              </div>
+              <div class="task-detail-controls">
+                <button class="dropdown-item status-cycle-icon ${getStatusClass(tip.status)}" data-tip-id="${tip.id}" title="Durum: ${getStatusText(tip.status)}">${getStatusText(tip.status)}</button>
+                <button class="dropdown-item calendar-trigger-item" data-tip-id="${tip.id}">Tarih Belirle</button>
+                ${tip.deadline ? `<button class="dropdown-item clear-deadline-item" data-tip-id="${tip.id}">Tarihi Temizle</button>` : ''}
+                <div class="task-detail-duration" aria-label="Süre ayarla">
+                  <span class="dropdown-submenu-title">Süre</span>
                   <div class="dropdown-duration-row">
                     <button class="duration-btn ${tip.focus_duration === 5 ? 'active' : ''}" data-tip-id="${tip.id}" data-duration="5">5dk</button>
                     <button class="duration-btn ${tip.focus_duration === 10 ? 'active' : ''}" data-tip-id="${tip.id}" data-duration="10">10dk</button>
                     <button class="duration-btn ${tip.focus_duration === 15 ? 'active' : ''}" data-tip-id="${tip.id}" data-duration="15">15dk</button>
                   </div>
-                  
-                  <div class="dropdown-divider"></div>
-                  <a class="dropdown-item archive-note-item" data-tip-id="${tip.id}">📦 Arşivle</a>
-                  <a class="dropdown-item delete-note-item danger-item" data-tip-id="${tip.id}">🗑️ Sil</a>
                 </div>
-                
-                <!-- Hidden input for datetimepicker -->
-                <input type="datetime-local" class="inline-deadline-input" data-tip-id="${tip.id}" style="position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none;" value="${tip.deadline || ''}">
+                <button class="dropdown-item archive-note-item" data-tip-id="${tip.id}">Arşivle</button>
+                <button class="dropdown-item delete-note-item danger-item" data-tip-id="${tip.id}">Sil</button>
               </div>
-            </div>
+            </section>
+            <input type="datetime-local" class="inline-deadline-input" data-tip-id="${tip.id}" style="position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none;" value="${tip.deadline || ''}">
           </div>
         `;
       }).join('');
@@ -4066,6 +4000,7 @@ function toggleAccordion(item) {
   const isExpanded = item.classList.contains('expanded');
   
   if (isExpanded) {
+    closeNoteMenus();
     // Collapse
     content.style.maxHeight = content.scrollHeight + 'px';
     content.offsetHeight; // force reflow
@@ -4412,6 +4347,40 @@ function enterNoteTextEditMode(el) {
   el.addEventListener('blur', blurHandler);
 }
 
+function queueTipDescriptionSave(input, immediate = false) {
+  const tipId = Number(input.dataset.tipId);
+  if (!Number.isInteger(tipId)) return;
+
+  const pendingTimer = descriptionSaveTimers.get(tipId);
+  if (pendingTimer) clearTimeout(pendingTimer);
+
+  const save = () => {
+    const tip = tips.find(item => item.id === tipId);
+    if (tip?.description === input.value) return;
+    return saveTipDescription(tipId, input.value);
+  };
+  if (immediate) {
+    descriptionSaveTimers.delete(tipId);
+    void save();
+  } else {
+    descriptionSaveTimers.set(tipId, setTimeout(() => {
+      descriptionSaveTimers.delete(tipId);
+      void save();
+    }, 900));
+  }
+}
+
+async function saveTipDescription(tipId, description) {
+  try {
+    if (!window.electronAPI || !window.electronAPI.dbRun) return;
+    await window.electronAPI.dbRun('UPDATE tips SET description = ? WHERE id = ?', [description, tipId]);
+    const tip = tips.find(item => item.id === tipId);
+    if (tip) tip.description = description;
+  } catch (err) {
+    console.error('Error updating tip description:', err);
+    showToast('Açıklama güncellenemedi.');
+  }
+}
 async function updateTipProperty(tipId, propName, value) {
   try {
     if (!window.electronAPI || !window.electronAPI.dbRun) return;

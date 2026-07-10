@@ -1418,8 +1418,6 @@ function showNotBitirildiScreen() {
   // Change button texts
   const notBitirildiDoneBtn = document.getElementById('not-bitirildi-done');
   const notBitirildiContinueBtn = document.getElementById('not-bitirildi-continue');
-  const notBitirildiMoreBtn = document.getElementById('not-bitirildi-more');
-  const focusDuration = currentTip?.focus_duration || 5;
 
   if (dismissLevel === 10) {
     if (notBitirildiDoneBtn) notBitirildiDoneBtn.textContent = 'Hallettim';
@@ -1434,20 +1432,6 @@ function showNotBitirildiScreen() {
     notBitirildiDoneBtn.removeAttribute('aria-busy');
   }
   if (notBitirildiContinueBtn) notBitirildiContinueBtn.disabled = false;
-  if (notBitirildiMoreBtn) notBitirildiMoreBtn.disabled = false;
-
-  if (notBitirildiMoreBtn) {
-    notBitirildiMoreBtn.textContent = `${focusDuration} Dakika Daha`;
-    notBitirildiMoreBtn.style.display = 'inline-block';
-    
-    // Bind click handler directly
-    notBitirildiMoreBtn.onclick = () => {
-      localStorage.setItem('active_timer_duration', focusDuration);
-      if (currentTip) localStorage.setItem('active_timer_tip_id', currentTip.id);
-      if (notBitirildiScreen) notBitirildiScreen.style.display = 'none';
-      startFiveMinuteTimer();
-    };
-  }
   
   triggerPopupResize();
 }
@@ -1770,8 +1754,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       notBitirildiDoneBtn.setAttribute('aria-busy', 'true');
       reasonLogged = true;
       if (notBitirildiContinueBtn) notBitirildiContinueBtn.disabled = true;
-      const notBitirildiMoreBtn = document.getElementById('not-bitirildi-more');
-      if (notBitirildiMoreBtn) notBitirildiMoreBtn.disabled = true;
 
       if (currentTip && window.electronAPI && window.electronAPI.dbRun) {
         try {
