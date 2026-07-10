@@ -31,8 +31,3 @@ NoteZ is a desktop-first reminder and task assistant built with Electron. It hel
 npm install
 npm start
 ```
-
-## Notes
-
-- The active working docs live in `docs/`.
-- UI and backend agents use separate job files to avoid overlapping changes.
