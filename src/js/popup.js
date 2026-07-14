@@ -35,7 +35,7 @@ let shakeAnimationId = null;
 let timerInterval = null;
 let isGameSuccess = false;
 let notBitirildiDoneInFlight = false;
-const snoozeReasonUiEnabled = true;
+const snoozeReasonUiEnabled = false;
 let popupResizeMode = 'content';
 
 // Wordle State
@@ -52,6 +52,7 @@ let chessBoardState = {};
 let chessSelectedSquare = null;
 let chessValidMoves = [];
 let chessActive = false;
+let chessDragState = null;
 
 const WORDLE_WORDS = [
   "ADRES", "ALARM", "AMPUL", "ARABA", "ARŞİV", "BAVUL", "BEYİN", "BİLİM", "BULUT", "CEKET",
@@ -206,11 +207,6 @@ function initializePopup(tipData) {
   
   // Setup follow-up question handlers
   setupFollowUpHandlers();
-  
-  // Play popup open sound
-  if (window.audioManager) {
-    window.audioManager.playPopupOpen();
-  }
 
   // Dynamic resize
   triggerPopupResize();
@@ -249,18 +245,17 @@ function setupDismissMechanism() {
   }
   twoMinBtn.disabled = false;
   
-  if (dismissLevel >= 1 && dismissLevel <= 3) {
-    // Single click dismiss
+  // Event buckets are explicit: 1-2 direct, 3-4 chess, 5-6 hold, 7-8 Wordle, 9-10 math.
+  if (dismissLevel >= 1 && dismissLevel <= 2) {
     setupSingleClickDismiss();
-  } else if (dismissLevel >= 4 && dismissLevel <= 5) {
-    // Hold-to-dismiss with progress bar
-    setupHoldToDismiss();
-  } else if (dismissLevel >= 6 && dismissLevel <= 9) {
-    // Wordle dismiss game
-    setupWordleDismiss();
-  } else if (dismissLevel === 10) {
-    // Chess dismiss game
+  } else if (dismissLevel >= 3 && dismissLevel <= 4) {
     setupLevelTen();
+  } else if (dismissLevel >= 5 && dismissLevel <= 6) {
+    setupHoldToDismiss();
+  } else if (dismissLevel >= 7 && dismissLevel <= 8) {
+    setupWordleDismiss();
+  } else if (dismissLevel >= 9 && dismissLevel <= 10) {
+    setupMathQuestion();
   }
 }
 
@@ -298,9 +293,9 @@ function setupHoldToDismiss() {
   progressBar.style.width = '0%';
   
   // Set hold duration based on importance level (dismissLevel)
-  if (dismissLevel === 4) {
+  if (dismissLevel === 5) {
     holdDuration = 4000;
-  } else if (dismissLevel === 5) {
+  } else if (dismissLevel === 6) {
     holdDuration = 6000;
   } else {
     holdDuration = 10000;
@@ -379,9 +374,9 @@ function setupWordleDismiss() {
   wordleContainer.style.display = 'flex';
   
   // Determine number of attempts
-  if (dismissLevel >= 6 && dismissLevel <= 7) {
+  if (dismissLevel === 7) {
     wordleMaxAttempts = 5;
-  } else if (dismissLevel >= 8 && dismissLevel <= 9) {
+  } else if (dismissLevel === 8) {
     wordleMaxAttempts = 4;
   } else {
     wordleMaxAttempts = 5;
@@ -749,8 +744,9 @@ function renderChessBoard() {
       
       square.onclick = (e) => {
         e.preventDefault();
-        handleChessSquareClick(c, r);
+        if (!chessDragState) handleChessSquareClick(c, r);
       };
+      square.onpointerdown = (e) => startChessDrag(e, posKey, square);
       
       boardEl.appendChild(square);
     }
@@ -758,6 +754,33 @@ function renderChessBoard() {
   
   triggerPopupResize();
 }
+
+function startChessDrag(event, fromKey, square) {
+  const piece = chessBoardState[fromKey];
+  if (!chessActive || !piece || piece.color !== 'w') return;
+  event.preventDefault();
+  const preview = document.createElement('span');
+  preview.className = `chess-drag-preview ${piece.color === 'w' ? 'white-piece' : 'black-piece'}`;
+  preview.textContent = piece.type === 'Q' ? '♛' : '♚';
+  document.body.appendChild(preview);
+  chessDragState = { fromKey, preview, board: square.closest('.chess-board') };
+  moveChessDragPreview(event);
+  window.addEventListener('pointermove', moveChessDragPreview);
+  window.addEventListener('pointerup', finishChessDrag, { once: true });
+  window.addEventListener('pointercancel', cancelChessDrag, { once: true });
+}
+function moveChessDragPreview(event) { if (chessDragState) chessDragState.preview.style.transform = `translate3d(${event.clientX - 16}px, ${event.clientY - 16}px, 0)`; }
+function finishChessDrag(event) {
+  const drag = chessDragState; cleanupChessDrag();
+  const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('.chess-square');
+  if (!drag || !target || target.closest('.chess-board') !== drag.board) return;
+  const toKey = `${target.dataset.col},${target.dataset.row}`;
+  if (toKey === drag.fromKey) return handleChessSquareClick(Number(target.dataset.col), Number(target.dataset.row));
+  if (chessSelectedSquare !== drag.fromKey) { const [fromCol, fromRow] = drag.fromKey.split(',').map(Number); handleChessSquareClick(fromCol, fromRow); }
+  if (chessValidMoves.includes(toKey)) executeChessMove(drag.fromKey, toKey);
+}
+function cancelChessDrag() { cleanupChessDrag(); }
+function cleanupChessDrag() { if (!chessDragState) return; chessDragState.preview.remove(); chessDragState = null; window.removeEventListener('pointermove', moveChessDragPreview); }
 
 function handleChessSquareClick(col, row) {
   if (!chessActive) return;
@@ -772,9 +795,6 @@ function handleChessSquareClick(col, row) {
   
   if (piece && piece.color === 'w') {
     chessSelectedSquare = clickPos;
-    if (window.audioManager) {
-      window.audioManager.playChessSelect();
-    }
     if (piece.type === 'Q') {
       chessValidMoves = getQueenMoves(col, row);
     } else if (piece.type === 'K') {
@@ -844,11 +864,6 @@ function executeChessMove(fromKey, toKey) {
   
   renderChessBoard();
   
-  // Play place sound first
-  if (window.audioManager) {
-    window.audioManager.playChessPlace();
-  }
-  
   if (piece.type === 'Q' && toKey === '6,1') {
     // Win! Queen moved to g7 (6,1)
     chessActive = false;
@@ -872,13 +887,6 @@ function executeChessMove(fromKey, toKey) {
       msgEl.textContent = "Yanlış Hamle! Tekrar Deneyin.";
       msgEl.style.color = "var(--danger-color)";
     }
-    
-    // Play wrong sound after a tiny delay
-    setTimeout(() => {
-      if (window.audioManager) {
-        window.audioManager.playChessWrong();
-      }
-    }, 200);
     
     setTimeout(() => {
       initializeChessGame();

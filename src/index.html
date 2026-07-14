@@ -315,7 +315,7 @@
         <!-- Developer Tools & Audio Settings Section -->
         <section class="settings-section" id="section-dev-tools">
           <div class="section-header">
-            <h2>Geliştirici Araçları & Ses Ayarları</h2>
+            <h2>Geliştirici Araçları</h2>
           </div>
           
           <div class="dev-tools-wrapper">
@@ -533,12 +533,13 @@
                   </div>
                 </div>
 
-                <div class="dev-tool-item">
-                  <label>Notification Budget</label>
+                <div class="dev-tool-item notification-budget-settings">
+                  <label for="notification-max-popups-per-hour">Saat Başına Maksimum Popup</label>
+                  <p class="notification-budget-help">Varsayılan limit 5'tir. Güvenli üst sınır 20 popup/saat olarak uygulanır.</p>
                   <div class="dev-tool-controls" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--spacing-sm);">
-                    <input type="number" id="notification-max-popups-per-hour" min="1" max="20" value="3" title="Saatlik popup limiti">
-                    <input type="number" id="notification-minimum-popup-interval" min="1" max="240" value="15" title="Minimum popup aralığı">
-                    <input type="number" id="notification-same-task-cooldown" min="1" max="480" value="45" title="Aynı not cooldown">
+                    <input type="number" id="notification-max-popups-per-hour" min="1" max="20" value="5" title="Saat başına maksimum popup" aria-label="Saat başına maksimum popup">
+                    <input type="number" id="notification-minimum-popup-interval" min="1" max="240" value="15" title="Minimum popup aralığı" aria-label="Minimum popup aralığı, dakika">
+                    <input type="number" id="notification-same-task-cooldown" min="1" max="480" value="45" title="Aynı not cooldown" aria-label="Aynı not cooldown, dakika">
                   </div>
                   <div class="dev-tool-controls" style="align-items: center; margin-top: var(--spacing-sm);">
                     <input type="checkbox" id="notification-quiet-hours-enabled" style="width: auto; height: 18px;">
@@ -610,25 +611,30 @@
               </div>
             </div>
 
-              <div class="dev-tool-item" style="grid-column: 1 / -1; width: 100%;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--spacing-sm);">
-                  <h3 style="margin-bottom: 0;">Notların Sonraki Tetiklenme Zamanları</h3>
-                  <button id="dev-refresh-popups" class="btn-secondary" style="padding: 4px 12px; font-size: 12px; margin-top: 0;">Yenile</button>
+              <section class="dev-tool-card popup-output-card">
+                <div class="popup-output-heading">
+                  <div>
+                    <h3>Popup Çıkış Sırası</h3>
+                    <p>Backend snapshotını gözlemler. Rank, kesin çıkış garantisi değildir; final probability olasılıklı seçimi gösterir.</p>
+                  </div>
+                  <button id="dev-refresh-popup-output" class="btn-secondary" title="Popup çıkış sırasını yenile">Yenile</button>
                 </div>
-                <div id="dev-next-popups-container" style="overflow-x: auto; max-height: 300px; scrollbar-width: thin;">
-                  <p style="color: var(--text-muted); font-size: 13px;">Yükleniyor...</p>
+                <div id="dev-popup-output-container" class="popup-output-container" aria-live="polite">
+                  <div class="popup-output-summary" id="dev-popup-output-summary">
+                    <div class="popup-output-summary-item"><span>Kullanılan</span><strong id="dev-popup-output-used">-</strong></div>
+                    <div class="popup-output-summary-item"><span>Saatlik limit</span><strong id="dev-popup-output-limit">-</strong></div>
+                    <div class="popup-output-summary-item"><span>Temel slot aralığı</span><strong id="dev-popup-output-slot-interval">-</strong></div>
+                    <div class="popup-output-summary-item"><span>Son popup</span><strong id="dev-popup-output-last-popup">-</strong></div>
+                    <div class="popup-output-summary-item"><span>Sonraki slot</span><strong id="dev-popup-output-next-slot">-</strong></div>
+                    <div class="popup-output-summary-item"><span>Sonraki izin</span><strong id="dev-popup-output-next-allowed">-</strong></div>
+                    <div class="popup-output-summary-item"><span>Zamanlama nedeni</span><strong id="dev-popup-output-scheduler">Okunuyor...</strong></div>
+                  </div>
+                  <p id="dev-popup-output-context" class="popup-output-context">Context durumu okunuyor...</p>
+                  <div id="dev-popup-output-body" class="popup-output-scroll" tabindex="0" aria-label="Popup adayları">
+                    <p class="popup-output-empty">Popup adayları okunuyor...</p>
+                  </div>
                 </div>
-              </div>
-
-              <div class="dev-tool-item" style="grid-column: 1 / -1; width: 100%;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--spacing-sm);">
-                  <h3 style="margin-bottom: 0;">🗂️ Popup Kuyruğu (Queue)</h3>
-                  <button id="dev-refresh-queue" class="btn-secondary" style="padding: 4px 12px; font-size: 12px; margin-top: 0;">Yenile</button>
-                </div>
-                <div id="dev-queue-container" style="font-family: monospace; font-size: 12px; color: var(--text-secondary); background: var(--bg-secondary); border-radius: var(--border-radius-sm); padding: 10px; max-height: 200px; overflow-y: auto;">
-                  <p style="color: var(--text-muted);">Yükleniyor...</p>
-                </div>
-              </div>
+              </section>
             </div>
           </div>
         </section>
@@ -732,7 +738,7 @@
   </div>
 
   <script src="js/analytics.js"></script>
-  <script src="js/audio.js"></script>
+  <script src="js/silent-audio.js"></script>
   <script src="js/settings.js"></script>
 </body>
 </html>

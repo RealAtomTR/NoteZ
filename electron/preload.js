@@ -1,4 +1,142 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webFrame } = require('electron');
+
+const AUDIO_DISABLED = true;
+const AUDIO_SUPPRESSED_RESULT = Object.freeze({ success: false, audioDisabled: true, audioSuppressed: true });
+const ignoreAudioEvent = () => undefined;
+
+if (AUDIO_DISABLED) {
+  webFrame.executeJavaScript(`
+    (() => {
+      window.NOTEZ_AUDIO_DISABLED = true;
+      if (window.HTMLMediaElement && !window.__notezOriginalMediaPlay) {
+        window.__notezOriginalMediaPlay = window.HTMLMediaElement.prototype.play;
+        window.HTMLMediaElement.prototype.play = function() {
+          try { this.pause(); } catch {}
+          return Promise.resolve({ success: false, audioDisabled: true, audioSuppressed: true });
+        };
+      }
+    })();
+  `).catch(() => undefined);
+}
+
+function setupChessFixtureEvent(data, fixture) {
+  const board = document.getElementById('chess-board');
+  const container = document.getElementById('chess-container');
+  const message = document.getElementById('chess-message');
+  if (!board || !container || !fixture || !Array.isArray(fixture.pieces)) return false;
+  if (!fixture.legalMoveVerified) {
+    container.style.display = 'flex';
+    board.innerHTML = '';
+    if (message) message.textContent = `Fixture geçersiz: ${fixture.validationReason || 'legal move doğrulanamadı'}`;
+    return true;
+  }
+  const glyphs = { wK: '♔', wQ: '♕', wR: '♖', wB: '♗', wN: '♘', wP: '♙', bK: '♚', bQ: '♛', bR: '♜', bB: '♝', bN: '♞', bP: '♟' };
+  const initialState = new Map(fixture.pieces.map(entry => {
+    const [piece, square] = String(entry).split(':');
+    return [square, piece];
+  }));
+  let state = new Map(initialState);
+  let selectedSquare = null;
+  let completed = false;
+
+  const render = () => {
+    board.innerHTML = '';
+    for (let rank = 8; rank >= 1; rank--) {
+      for (const file of 'abcdefgh') {
+        const squareName = `${file}${rank}`;
+        const square = document.createElement('div');
+        const fileIndex = file.charCodeAt(0) - 97;
+        square.className = `chess-square ${(fileIndex + rank) % 2 ? 'light' : 'dark'}`;
+        square.dataset.square = squareName;
+        if (selectedSquare === squareName) square.classList.add('selected');
+        const piece = state.get(squareName);
+        if (piece) {
+          const pieceElement = document.createElement('span');
+          pieceElement.className = `chess-piece ${piece.startsWith('w') ? 'white-piece' : 'black-piece'}`;
+          pieceElement.textContent = glyphs[piece] || '';
+          square.appendChild(pieceElement);
+        }
+        square.onclick = async event => {
+          event.preventDefault();
+          if (completed) return;
+          if (!selectedSquare) {
+            if (squareName === fixture.from) {
+              selectedSquare = squareName;
+              if (message) message.textContent = `${fixture.turn === 'black' ? 'Siyah' : 'Beyaz'}: mat hamlesini tamamla`;
+            } else if (message) {
+              message.textContent = 'Yanlış taş. Board değişmedi.';
+            }
+            render();
+            return;
+          }
+          if (selectedSquare !== fixture.from || squareName !== fixture.to) {
+            selectedSquare = null;
+            state = new Map(initialState);
+            if (message) message.textContent = 'Yanlış hamle. Board sıfırlandı.';
+            render();
+            return;
+          }
+          const movingPiece = state.get(fixture.from);
+          state.delete(fixture.from);
+          state.set(fixture.to, movingPiece);
+          selectedSquare = null;
+          completed = true;
+          if (message) message.textContent = `${fixture.move} — Şah mat`;
+          render();
+          setTimeout(() => {
+            if (window.electronAPI && window.electronAPI.closePopup) window.electronAPI.closePopup();
+          }, 750);
+        };
+        board.appendChild(square);
+      }
+    }
+  };
+
+  container.style.display = 'flex';
+  if (message) message.textContent = `${fixture.turn === 'black' ? 'Siyah' : 'Beyaz'} oynar — 1 hamlede mat`;
+  render();
+  return true;
+}
+
+function installDeterministicPopupRoute(data = {}) {
+  if (typeof window.setupDismissMechanism !== 'function') return;
+  const eventType = data.eventType;
+  if (!eventType) return;
+
+  window.setupDismissMechanism = function() {
+    const dismissButton = document.getElementById('dismiss-btn');
+    const dismissReasons = document.getElementById('dismiss-reasons');
+    const snoozeLimitInfo = document.getElementById('snooze-limit-info');
+    const twoMinuteButton = document.getElementById('two-min-btn');
+    const progress = document.getElementById('progress-container');
+    const mathQuestion = document.getElementById('math-question');
+    const wordle = document.getElementById('wordle-container');
+    const chess = document.getElementById('chess-container');
+    [progress, mathQuestion, wordle, chess].forEach(element => { if (element) element.style.display = 'none'; });
+    if (dismissButton) dismissButton.style.display = 'none';
+    if (dismissReasons) dismissReasons.style.display = 'none';
+    if (snoozeLimitInfo) snoozeLimitInfo.style.display = 'none';
+    if (twoMinuteButton) twoMinuteButton.style.display = 'none';
+
+    if (eventType === 'dismiss' && typeof window.setupSingleClickDismiss === 'function') {
+      window.setupSingleClickDismiss();
+    } else if (eventType === 'chess-one-move-mate') {
+      const fixtureInstalled = setupChessFixtureEvent(data, data.chessFixture || null);
+      if (!fixtureInstalled && typeof window.setupLevelTen === 'function') window.setupLevelTen();
+    } else if (eventType === 'hold-to-dismiss' && typeof window.setupHoldToDismiss === 'function') {
+      window.setupHoldToDismiss();
+    } else if (eventType === 'wordle' && typeof window.setupWordleDismiss === 'function') {
+      window.setupWordleDismiss();
+    } else if (eventType === 'math' && typeof window.setupMathQuestion === 'function') {
+      window.setupMathQuestion();
+    }
+
+    // The route contract never exposes snooze/two-minute controls in this version.
+    if (dismissReasons) dismissReasons.style.display = 'none';
+    if (snoozeLimitInfo) snoozeLimitInfo.style.display = 'none';
+    if (twoMinuteButton) twoMinuteButton.style.display = 'none';
+  };
+}
 
 // Expose safe APIs to renderer process
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -7,6 +145,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dbRun: (sql, params) => {
     return ipcRenderer.invoke('db-run', sql, params);
   },
+  getStatistics: (mode = 'weekly') => ipcRenderer.invoke('statistics-get', mode),
+  getDashboardWeeklyProgress: () => ipcRenderer.invoke('dashboard-weekly-progress'),
 
   // Window operations
   showPopup: (tipData, options) => ipcRenderer.invoke('show-popup', tipData, options),
@@ -23,7 +163,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
 
   // Listen for tip data from main process (popup window)
-  onShowTip: (callback) => ipcRenderer.on('show-tip', (event, data) => callback(data)),
+  onShowTip: (callback) => ipcRenderer.on('show-tip', (event, data) => {
+    installDeterministicPopupRoute(data);
+    callback(data);
+  }),
 
   // Remove listener
   removeShowTipListener: () => ipcRenderer.removeAllListeners('show-tip'),
@@ -32,19 +175,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   logDismissReason: (tipId, reason) => ipcRenderer.invoke('log-dismiss-reason', tipId, reason),
 
   // Audio controls (SFX only — background music removed)
-  audioStop: () => ipcRenderer.invoke('audio-stop'),
-  audioSetVolume: (volume) => ipcRenderer.invoke('audio-set-volume', volume),
+  audioStop: () => Promise.resolve({ ...AUDIO_SUPPRESSED_RESULT }),
+  audioSetVolume: () => Promise.resolve({ ...AUDIO_SUPPRESSED_RESULT }),
   getAudioSettings: () => ipcRenderer.invoke('get-audio-settings'),
   getPopupQueue: () => ipcRenderer.invoke('get-popup-queue'),
   getPopupDebugState: () => ipcRenderer.invoke('get-popup-debug-state'),
+  debugGetNextPopups: () => ipcRenderer.invoke('debug-get-next-popups'),
 
   // Audio control listeners (SFX only)
-  onAudioFadeIn: (callback) => ipcRenderer.on('audio-fade-in', () => callback()),
-  onAudioFadeOut: (callback) => ipcRenderer.on('audio-fade-out', () => callback()),
-  onAudioStop: (callback) => ipcRenderer.on('audio-stop', () => callback()),
-  onAudioSetVolume: (callback) => ipcRenderer.on('audio-set-volume', (_, vol) => callback(vol)),
+  onAudioFadeIn: ignoreAudioEvent,
+  onAudioFadeOut: ignoreAudioEvent,
+  onAudioStop: ignoreAudioEvent,
+  onAudioSetVolume: ignoreAudioEvent,
   // Fired by main on did-finish-load — contains the raw DB settings map (music keys excluded)
-  onAudioSettingsReady: (callback) => ipcRenderer.on('audio-settings-ready', (_event, settings) => callback(settings)),
+  onAudioSettingsReady: ignoreAudioEvent,
 
   // Remove audio listeners
   removeAudioListeners: () => {
@@ -114,7 +258,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onPopupDebugUpdated: (callback) => ipcRenderer.on('popup-debug-updated', (_event, data) => callback(data)),
 
   // SFX trigger events from main process
-  onPopupSfxTrigger: (callback) => ipcRenderer.on('popup-sfx-trigger', (_event) => callback()),
+  onPopupSfxTrigger: ignoreAudioEvent,
 
   // Markdown import
   importMarkdownFile: () => ipcRenderer.invoke('import-markdown-file'),
@@ -136,8 +280,33 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // 1. Monkeypatch window.audioManager.initialize if available
-  if (window.audioManager) {
+  if (AUDIO_DISABLED && window.audioManager) {
+    const disabledAudioMethods = [
+      'fadeInBackgroundMusic', 'fadeOutBackgroundMusic', 'stopBackgroundMusic',
+      'playSoundEffect', 'playLevel10BuildUp', 'playLevel10Hit', 'stopLevel10BuildUp',
+      'playPopupOpen', 'playDismissSnooze', 'playMathCorrect', 'playConfetti',
+      'playBtnClick', 'playCheckinSuccess', 'playChessSelect', 'playChessPlace',
+      'playChessCheckmate', 'playChessWrong', 'playCustomSFX', 'updateSoundEffect'
+    ];
+    disabledAudioMethods.forEach(method => {
+      window.audioManager[method] = () => ({ ...AUDIO_SUPPRESSED_RESULT });
+    });
+    window.audioManager.initialize = async function() {
+      this.volume = 0;
+      this.musicVolume = 0;
+      this.backgroundMusic = null;
+      this.soundEffects = {};
+      this.audioDisabled = true;
+      return { ...AUDIO_SUPPRESSED_RESULT };
+    };
+    window.audioManager.setVolume = () => 0;
+    window.audioManager.setMusicVolume = () => 0;
+    window.audioManager.getVolume = () => 0;
+    window._audioInitPromise = Promise.resolve(AUDIO_SUPPRESSED_RESULT);
+  }
+
+  // Legacy audio wiring is preserved for a future release, but remains dormant.
+  if (window.audioManager && !AUDIO_DISABLED) {
     const originalInitialize = window.audioManager.initialize;
 
     // ── FIX #FixThis 15 Madde 1 & 2: Race condition ──────────────────────────

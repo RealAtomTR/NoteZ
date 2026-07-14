@@ -420,6 +420,24 @@ function runMigrations() {
       console.error('[DB] Migration 016 FAILED:', e.message);
     }
   }
+  // Migration 017: popup selection defaults (all values remain user-overridable settings)
+  const popupSelectionDefaults = {
+    notification_max_popups_per_hour: '5',
+    popup_selection_context_match_percent: '70',
+    popup_selection_importance_exponent: '1.35',
+    popup_selection_staleness_hours: '24',
+    popup_selection_staleness_max_boost: '2',
+    popup_selection_deadline_boost: '1',
+    popup_selection_debug_seed: '-1'
+  };
+  try {
+    Object.entries(popupSelectionDefaults).forEach(([key, value]) => {
+      db.run('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', [key, value]);
+    });
+    console.log('[DB] Migration 017: popup selection defaults ensured');
+  } catch (e) {
+    console.error('[DB] Migration 017 FAILED:', e.message);
+  }
 }
 
 

@@ -5,6 +5,127 @@ const db = require('./db');
 const activeWin = require('active-win');
 const markdownStorage = require('./markdown-storage');
 
+const HOUR_MS = 60 * 60 * 1000;
+const AUDIO_DISABLED = true;
+const SEQUENTIAL_TERMINAL_STATUSES = Object.freeze(['done', 'cancelled']);
+const SEQUENTIAL_TERMINAL_STATUS_SQL = SEQUENTIAL_TERMINAL_STATUSES.map(status => `'${status}'`).join(', ');
+const ALLOWED_SNOOZE_REASONS = Object.freeze(['not_today', 'remind_1h', 'no_motivation', 'not_now']);
+const AUDIO_DISABLED_SETTINGS = Object.freeze({
+  audioDisabled: true,
+  audioSuppressed: true,
+  audio_volume: '0',
+  music_volume: '0',
+  background_music: null
+});
+
+const CHESS_MATE_FIXTURES = Object.freeze([
+  {
+    id: 'mate-1', turn: 'black', move: 'Rf8-f1#', from: 'f8', to: 'f1',
+    pieces: ['wK:h1','wR:f1','wR:b1','wB:d3','wP:h2','wP:a3','wP:b4','wP:c4','wP:c5','wP:g4','bK:h8','bQ:d4','bR:f8','bN:c7','bN:g7','bP:a7','bP:h7','bP:b6','bP:c6','bP:e6','bP:g6']
+  },
+  {
+    id: 'mate-2', turn: 'black', move: 'Bc8-b7#', from: 'c8', to: 'b7',
+    pieces: ['wK:g1','wQ:g4','wR:a1','wR:e1','wB:b2','wN:d2','wP:a3','wP:b4','wP:c5','wP:e3','wP:f2','wP:g2','wP:h3','bK:g8','bQ:d8','bR:a8','bR:f8','bB:e7','bB:c8','bP:a6','bP:b5','bP:c6','bP:d5','bP:e6','bP:f7','bP:g7','bP:h6']
+  },
+  {
+    id: 'mate-3', turn: 'black', move: 'Qf6-f3#', from: 'f6', to: 'f3',
+    pieces: ['wK:h1','wQ:c2','wR:a1','wR:f1','wB:b1','wN:a3','wP:a2','wP:b2','wP:c3','wP:d4','wP:f3','bK:g8','bQ:f6','bR:a8','bR:f8','bB:h2','bN:c6','bP:a6','bP:b7','bP:c4','bP:d5','bP:f7','bP:g7','bP:h7']
+  },
+  {
+    id: 'mate-4', turn: 'black', move: 'd5-d4#', from: 'd5', to: 'd4',
+    pieces: ['wK:c1','wQ:e2','wR:a1','wR:d1','wB:b2','wB:g2','wN:c3','wP:a4','wP:b3','wP:c2','wP:d2','wP:f2','wP:g4','wP:h4','bK:g8','bQ:f6','bR:a8','bR:e8','bB:c8','bB:d4','bN:c6','bP:a6','bP:b7','bP:c7','bP:d5','bP:f7','bP:g7','bP:h7']
+  },
+  {
+    id: 'mate-5', turn: 'black', move: 'Rd8-d1#', from: 'd8', to: 'd1',
+    pieces: ['wK:a1','wQ:h5','wR:d1','wB:c3','wN:f3','wP:a2','wP:b2','wP:e5','wP:f4','wP:h2','bK:c8','bR:d8','bR:f8','bN:e7','bP:a7','bP:c7','bP:f7','bP:h7']
+  }
+]);
+
+function normalizePopupBudget(value) {
+  const budget = Math.floor(Number(value));
+  return Number.isFinite(budget) && budget > 0 ? budget : 1;
+}
+
+function calculateNextPopupSchedule({
+  now = Date.now(),
+  schedulerStartedAt = now,
+  lastPopupAt = null,
+  recentPopupTimestamps = [],
+  maxPopupsPerHour
+}) {
+  const budget = normalizePopupBudget(maxPopupsPerHour);
+  const slotIntervalMs = HOUR_MS / budget;
+  const currentTime = Number(now);
+  const startedAt = Number(schedulerStartedAt);
+  const lastShownAt = Number(lastPopupAt);
+  const anchorAt = Number.isFinite(lastShownAt) && lastShownAt >= currentTime - HOUR_MS && lastShownAt <= currentTime
+    ? lastShownAt
+    : startedAt;
+  const recentWindowStart = currentTime - HOUR_MS;
+  const recent = recentPopupTimestamps
+    .map(Number)
+    .filter(timestamp => Number.isFinite(timestamp) && timestamp >= recentWindowStart && timestamp <= currentTime)
+    .sort((a, b) => a - b);
+  const elapsedSlots = Math.floor(Math.max(0, currentTime - anchorAt) / slotIntervalMs);
+  let slotNumber = elapsedSlots + 1;
+  let nextPopupAt = anchorAt + slotNumber * slotIntervalMs;
+  let rollingWindowAvailableAt = null;
+
+  if (recent.length >= budget) {
+    const expirationsNeeded = recent.length - budget + 1;
+    rollingWindowAvailableAt = recent[expirationsNeeded - 1] + HOUR_MS;
+    if (nextPopupAt < rollingWindowAvailableAt) {
+      slotNumber = Math.ceil((rollingWindowAvailableAt - anchorAt) / slotIntervalMs);
+      nextPopupAt = anchorAt + Math.max(1, slotNumber) * slotIntervalMs;
+    }
+  }
+
+  return {
+    nextPopupAt,
+    delayMs: Math.max(0, nextPopupAt - currentTime),
+    slotIntervalMs,
+    maxPopupsPerHour: budget,
+    usedPopupCount: recent.length,
+    rollingWindowAvailableAt,
+    anchorAt,
+    windowStartAt: recentWindowStart,
+    windowEndAt: currentTime
+  };
+}
+
+function validateChessFixtureMove(fixture) {
+  const board = new Map(fixture.pieces.map(entry => {
+    const [piece, square] = String(entry).split(':');
+    return [square, piece];
+  }));
+  const movingPiece = board.get(fixture.from);
+  const targetPiece = board.get(fixture.to);
+  const expectedColor = fixture.turn === 'black' ? 'b' : 'w';
+  if (!movingPiece || !movingPiece.startsWith(expectedColor)) return { legal: false, reason: 'missing-or-wrong-turn-piece' };
+  if (targetPiece && targetPiece[0] === movingPiece[0]) return { legal: false, reason: 'target-occupied-by-own-piece' };
+  return { legal: true, reason: 'fixture-basic-legality-passed' };
+}
+
+function getPopupEventRoute(importanceValue, tipId = null) {
+  const importance = Math.max(1, Math.min(10, Number(importanceValue) || 1));
+  if (importance <= 2) return { eventType: 'dismiss', importanceBucket: '1-2', routeReason: 'importance-1-2-dismiss-only' };
+  if (importance <= 4) {
+    const numericId = Number(tipId);
+    const fixtureIndex = Number.isFinite(numericId) ? Math.abs(Math.trunc(numericId)) % CHESS_MATE_FIXTURES.length : 0;
+    const fixture = CHESS_MATE_FIXTURES[fixtureIndex];
+    const verification = validateChessFixtureMove(fixture);
+    return {
+      eventType: 'chess-one-move-mate',
+      importanceBucket: '3-4',
+      routeReason: 'importance-3-4-chess',
+      chessFixture: { ...fixture, legalMoveVerified: verification.legal, validationReason: verification.reason, checkmateClaimed: fixture.move.endsWith('#') }
+    };
+  }
+  if (importance <= 6) return { eventType: 'hold-to-dismiss', importanceBucket: '5-6', routeReason: 'importance-5-6-hold' };
+  if (importance <= 8) return { eventType: 'wordle', importanceBucket: '7-8', routeReason: 'importance-7-8-wordle' };
+  return { eventType: 'math', importanceBucket: '9-10', routeReason: 'importance-9-10-math-no-dismiss-or-snooze' };
+}
+
 let mainWindow = null;
 let tray = null;
 let popupWindow = null;
@@ -17,8 +138,10 @@ let popupQueuedKeys = new Set();
 let activePopupKey = null;
 let titleCheckInterval = null;
 let randomPopupInterval = null;
+let randomPopupSchedulerStartedAt = null;
 let debugPopupInterval = null;
 let debugPopupCount = 0;
+let popupSelectionSequence = 0;
 let lastShownTips = new Map(); // Track tips shown in last hour
 let audioSettings = null; // Cache audio settings
 let currentTipForTimer = null; // Store tip data for timer follow-up
@@ -35,6 +158,9 @@ let popupDebugState = {
   lastScoring: null,
   lastCandidate: null,
   lastSuppression: null,
+  lastSchedulerAttempt: null,
+  lastSequentialProgression: null,
+  lastSnoozeValidation: null,
   activePopupKey: null,
   queueLength: 0,
   updatedAt: null
@@ -104,16 +230,7 @@ function setupMarkdownStorageWatcher() {
 
 // Load audio settings from database
 function loadAudioSettings() {
-  try {
-    const settings = db.query(`SELECT key, value FROM settings`);
-    audioSettings = {};
-    settings.forEach(setting => {
-      audioSettings[setting.key] = setting.value;
-    });
-  } catch (error) {
-    console.error('Error loading audio settings:', error);
-    audioSettings = {};
-  }
+  audioSettings = { ...AUDIO_DISABLED_SETTINGS };
 }
 
 function updatePopupDebugState(patch = {}) {
@@ -132,6 +249,11 @@ function updatePopupDebugState(patch = {}) {
 
 function summarizeTipForDebug(tip) {
   if (!tip) return null;
+  const deadlineInfo = getEffectiveDeadlineInfo(tip);
+  const mappedEventRoute = getPopupEventRoute(tip.importance, tip.id);
+  const eventRoute = deadlineInfo.deadlineState === 'overdue'
+    ? { eventType: null, importanceBucket: mappedEventRoute.importanceBucket, routeReason: 'deadline-expired-before-route' }
+    : mappedEventRoute;
   return {
     id: tip.id,
     categoryId: tip.category_id,
@@ -140,8 +262,18 @@ function summarizeTipForDebug(tip) {
     importance: tip.importance,
     status: tip.status,
     deadline: tip.deadline || null,
+    effectiveDeadline: tip.effectiveDeadline ?? deadlineInfo.effectiveDeadline,
+    deadlineSource: tip.deadlineSource ?? deadlineInfo.deadlineSource,
+    deadlineState: tip.deadlineState ?? deadlineInfo.deadlineState,
+    deadlineDaysRemaining: tip.deadlineDaysRemaining ?? deadlineInfo.deadlineDaysRemaining,
+    deadlineMultiplier: tip.deadlineMultiplier ?? null,
+    deadlineBoostApplied: tip.deadlineBoostApplied ?? null,
+    isSequential: tip.isSequential ?? deadlineInfo.isSequential,
+    sequentialActiveTipId: tip.sequentialActiveTipId ?? deadlineInfo.sequentialActiveTipId,
+    isSequentialActiveStep: tip.isSequentialActiveStep ?? deadlineInfo.isSequentialActiveStep,
     tipTrackingApp: tip.tip_tracking_app || null,
-    score: tip.score !== undefined ? tip.score : calculateTipScore(tip)
+    score: tip.score !== undefined ? tip.score : calculateTipScore(tip),
+    ...eventRoute
   };
 }
 
@@ -163,6 +295,253 @@ function normalizeActiveWindow(activeWindow, source) {
   };
 }
 
+function getDebugTipScore(data) {
+  if (!data) return null;
+  if (data.score !== undefined && data.score !== null) return data.score;
+
+  const tipId = data.tipId || data.id;
+  if (!tipId) return null;
+
+  try {
+    const tip = db.get('SELECT * FROM tips WHERE id = ?', [tipId]);
+    return tip ? calculateTipScore(tip) : null;
+  } catch {
+    return null;
+  }
+}
+
+function getCooldownRemainingMinutes(tip, budget, now = Date.now(), lastPopupAt = null) {
+  const tipLastShown = Number(tip.last_shown || 0);
+  const snoozedUntil = tip.snoozed_until ? new Date(tip.snoozed_until).getTime() : 0;
+  const sameTaskUntil = tipLastShown ? tipLastShown + budget.sameTaskCooldownMinutes * 60 * 1000 : 0;
+  const randomUntil = tipLastShown ? tipLastShown + 60 * 60 * 1000 : 0;
+  const minimumIntervalUntil = lastPopupAt ? Number(lastPopupAt) + budget.minimumPopupIntervalMinutes * 60 * 1000 : 0;
+  const blockedUntil = Math.max(snoozedUntil || 0, sameTaskUntil, randomUntil, minimumIntervalUntil);
+  return blockedUntil > now ? Math.ceil((blockedUntil - now) / 60000) : 0;
+}
+
+function getPopupCandidateDiagnostics(triggerTime) {
+  try {
+    const now = Date.now();
+    const budget = getNotificationBudget();
+    const fullscreenOrGameMode = isFullscreenActive() || isGameModeActive();
+    const quietHours = isQuietHoursActive(budget);
+    const lastPopup = db.get(
+      'SELECT MAX(last_shown) as last_shown FROM tips WHERE last_shown IS NOT NULL AND archived_at IS NULL'
+    );
+    const recent = db.get(
+      'SELECT COUNT(*) as count, MIN(last_shown) as oldest FROM tips WHERE last_shown IS NOT NULL AND archived_at IS NULL AND last_shown >= ?',
+      [now - 60 * 60 * 1000]
+    );
+    const hourlyBudgetExhausted = Boolean(recent && recent.count >= budget.maxPopupsPerHour);
+    const hourlyBudget = {
+      exhausted: hourlyBudgetExhausted,
+      currentCount: recent?.count || 0,
+      maxPopupsPerHour: budget.maxPopupsPerHour,
+      nextAllowedAt: hourlyBudgetExhausted && recent?.oldest
+        ? new Date(Number(recent.oldest) + 60 * 60 * 1000).toISOString()
+        : null
+    };
+    const tips = db.query(
+      'SELECT t.*, c.name as category_name, c.color as category_color, '
+      + 's.is_sequential AS subcategory_is_sequential, s.deadline_mode AS subcategory_deadline_mode, '
+      + 's.shared_deadline AS subcategory_shared_deadline, '
+      + '(SELECT active_tip.id FROM tips active_tip WHERE active_tip.subcategory_id = t.subcategory_id '
+      + `AND active_tip.status NOT IN (${SEQUENTIAL_TERMINAL_STATUS_SQL}) AND active_tip.archived_at IS NULL `
+      + 'ORDER BY COALESCE(active_tip.order_index, 2147483647), active_tip.id LIMIT 1) AS sequential_active_tip_id '
+      + 'FROM tips t JOIN categories c ON t.category_id = c.id '
+      + 'LEFT JOIN subcategories s ON s.id = t.subcategory_id '
+      + "WHERE t.status = 'active' AND t.archived_at IS NULL"
+    );
+
+    const candidates = tips.map(tip => {
+      const importance = Number(tip.importance || 1);
+      const factors = getPopupSelectionFactors(tip, budget, now);
+      let suppressionReason = null;
+
+      if (factors.deadlineState === 'overdue') {
+        suppressionReason = 'deadline-expired';
+      } else if (tip.next_due_at && new Date(tip.next_due_at).getTime() > now) {
+        suppressionReason = 'not-due-yet';
+      } else if (tip.snoozed_until && new Date(tip.snoozed_until).getTime() > now) {
+        suppressionReason = 'snoozed';
+      } else if (tip.last_shown && now - Number(tip.last_shown) < 60 * 60 * 1000) {
+        suppressionReason = 'random-one-hour-cooldown';
+      } else if (factors.isSequential && !factors.isSequentialActiveStep) {
+        suppressionReason = 'sequential-step-locked';
+      } else if (importance < 9 && fullscreenOrGameMode) {
+        suppressionReason = 'fullscreen-or-game-mode';
+      } else if (importance < 10 && quietHours) {
+        suppressionReason = 'quiet-hours';
+      } else if (tip.last_shown && now - Number(tip.last_shown) < budget.sameTaskCooldownMinutes * 60 * 1000) {
+        suppressionReason = 'same-task-cooldown';
+      } else if (
+        importance < 10
+        && lastPopup?.last_shown
+        && now - Number(lastPopup.last_shown) < budget.minimumPopupIntervalMinutes * 60 * 1000
+      ) {
+        suppressionReason = 'minimum-popup-interval';
+      }
+
+      return {
+        ...summarizeTipForDebug({ ...tip, score: calculateTipScore(tip) }),
+        plannedTriggerAt: triggerTime,
+        eligibility: suppressionReason ? 'ineligible' : (hourlyBudgetExhausted ? 'deferred' : 'eligible'),
+        suppressionReason,
+        schedulerReason: hourlyBudgetExhausted ? 'hourly-budget-exhausted' : null,
+        hourlyBudget,
+        finalWeight: factors.importanceWeight * factors.stalenessBoost * factors.deadlineMultiplier,
+        probability: 0,
+        finalProbability: 0,
+        importanceWeight: factors.importanceWeight,
+        contextMatch: factors.contextMatch,
+        stalenessBoost: factors.stalenessBoost,
+        deadlineMultiplier: factors.deadlineMultiplier,
+        deadlineBoostApplied: factors.deadlineBoostApplied,
+        effectiveDeadline: factors.effectiveDeadline,
+        deadlineSource: factors.deadlineSource,
+        deadlineState: factors.deadlineState,
+        deadlineDaysRemaining: factors.deadlineDaysRemaining,
+        isSequential: factors.isSequential,
+        sequentialActiveTipId: factors.sequentialActiveTipId,
+        isSequentialActiveStep: factors.isSequentialActiveStep,
+        cooldownRemaining: getCooldownRemainingMinutes(tip, budget, now, lastPopup?.last_shown)
+      };
+    });
+
+    const eligible = candidates.filter(candidate => candidate.eligibility === 'eligible');
+    const contextCandidates = eligible.filter(candidate => candidate.contextMatch);
+    const generalCandidates = eligible.filter(candidate => !candidate.contextMatch);
+    const contextShare = contextCandidates.length && generalCandidates.length
+      ? budget.contextMatchPercent / 100
+      : (contextCandidates.length ? 1 : 0);
+    const generalShare = generalCandidates.length
+      ? (contextCandidates.length ? 1 - contextShare : 1)
+      : 0;
+    const assignProbability = (pool, groupShare) => {
+      const totalWeight = pool.reduce((sum, candidate) => sum + candidate.finalWeight, 0);
+      pool.forEach(candidate => {
+        candidate.probability = totalWeight > 0 ? groupShare * candidate.finalWeight / totalWeight : 0;
+        candidate.finalProbability = candidate.probability;
+      });
+    };
+    assignProbability(contextCandidates, contextShare);
+    assignProbability(generalCandidates, generalShare);
+
+    return candidates.sort((a, b) => {
+      if (a.eligibility !== b.eligibility) return a.eligibility === 'eligible' ? -1 : 1;
+      return Number(b.finalWeight || 0) - Number(a.finalWeight || 0);
+    });
+  } catch (error) {
+    return [{
+      title: 'Popup candidate diagnostics unavailable',
+      plannedTriggerAt: triggerTime,
+      eligibility: 'unknown',
+      suppressionReason: 'candidate-diagnostics-error',
+      diagnosticError: error.message
+    }];
+  }
+}
+function buildPopupExitOrder(triggerTime) {
+  const attempt = popupDebugState.lastSchedulerAttempt;
+  const suppression = popupDebugState.lastSuppression;
+  const scoringCandidates = popupDebugState.lastScoring?.candidates || [];
+  const rows = [];
+  const seenTipIds = new Set();
+
+  const addRow = (data, state, key = null, plannedTriggerAt = null, reason = null) => {
+    if (!data) return;
+    const tipId = data.tipId || data.id || null;
+    if (tipId && seenTipIds.has(tipId)) return;
+    if (tipId) seenTipIds.add(tipId);
+
+    const deadlineExpired = data.deadlineState === 'overdue' || reason === 'deadline-expired';
+    const mappedEventRoute = getPopupEventRoute(data.importance, tipId);
+    rows.push({
+      rank: rows.length + 1,
+      key,
+      tipId,
+      title: data.content || data.title || null,
+      importance: data.importance ?? null,
+      plannedTriggerAt,
+      queueScore: getDebugTipScore(data),
+      rawScore: getDebugTipScore(data),
+      finalWeight: data.finalWeight ?? null,
+      probability: data.probability ?? null,
+      importanceWeight: data.importanceWeight ?? null,
+      contextMatch: data.contextMatch ?? null,
+      stalenessBoost: data.stalenessBoost ?? null,
+      deadlineMultiplier: data.deadlineMultiplier ?? null,
+      cooldownRemaining: data.cooldownRemaining ?? null,
+      eligibility: state,
+      eligible: state === 'active' || state === 'queued' || state === 'eligible'
+        ? true
+        : (state === 'ineligible' || state === 'suppressed' || state === 'deferred' ? false : null),
+      suppressionReason: reason,
+      schedulerReason: data.schedulerReason ?? null,
+      hourlyBudget: data.hourlyBudget ?? null,
+      eventType: deadlineExpired ? null : (data.eventType ?? mappedEventRoute.eventType),
+      importanceBucket: data.importanceBucket ?? mappedEventRoute.importanceBucket,
+      routeReason: deadlineExpired ? 'deadline-expired-before-route' : (data.routeReason ?? mappedEventRoute.routeReason)
+    });
+  };
+
+  if (activePopupKey && pendingTipData) {
+    addRow(pendingTipData, 'active', activePopupKey, attempt?.attemptedAt || null, null);
+  }
+
+  popupQueue.forEach(item => {
+    const itemTipId = item.data && (item.data.tipId || item.data.id);
+    const isAttemptedCandidate = itemTipId && attempt?.candidate?.id === itemTipId;
+    addRow(item.data, 'queued', item.key, isAttemptedCandidate ? attempt.attemptedAt : null, null);
+  });
+
+  if (rows.length === 0 && attempt?.result === 'no-eligible-tip') {
+    addRow(
+      { title: 'No eligible popup candidate' },
+      'ineligible',
+      'scheduler:no-eligible-tip',
+      attempt.attemptedAt,
+      suppression?.reason || 'no-eligible-candidate'
+    );
+    return rows;
+  }
+
+  scoringCandidates.forEach(candidate => {
+    const isAttemptedCandidate = attempt?.candidate?.id === candidate.id;
+    const isSuppressed = isAttemptedCandidate && attempt?.result === 'suppressed';
+    addRow(
+      candidate,
+      isSuppressed ? 'suppressed' : 'candidate',
+      candidate.id ? 'candidate:' + candidate.id : null,
+      isAttemptedCandidate ? attempt.attemptedAt : triggerTime,
+      isSuppressed ? (attempt.reason || suppression?.reason || null) : null
+    );
+  });
+
+  getPopupCandidateDiagnostics(triggerTime).forEach(candidate => {
+    addRow(
+      candidate,
+      candidate.eligibility,
+      candidate.id ? 'diagnostic:' + candidate.id : 'scheduler:candidate-diagnostics',
+      candidate.plannedTriggerAt,
+      candidate.suppressionReason
+    );
+  });
+
+  if (rows.length === 0) {
+    addRow(
+      { title: 'No active popup candidate' },
+      'ineligible',
+      'scheduler:no-active-tip',
+      triggerTime,
+      'no-active-tip'
+    );
+  }
+
+  return rows;
+}
+
 function getPopupDebugStateSnapshot() {
   const queuedItems = popupQueue.map(item => ({
     key: item.key,
@@ -182,6 +561,37 @@ function getPopupDebugStateSnapshot() {
     || null;
   const nextTrigger = popupDebugState.nextTrigger || {};
   const triggerTime = nextTrigger.debugPopupNextAt || nextTrigger.randomPopupAt || null;
+  const triggerTimestamp = triggerTime ? new Date(triggerTime).getTime() : NaN;
+  const triggerOverdue = Number.isFinite(triggerTimestamp) && triggerTimestamp <= Date.now();
+  const attemptTimestamp = popupDebugState.lastSchedulerAttempt?.attemptedAt
+    ? new Date(popupDebugState.lastSchedulerAttempt.attemptedAt).getTime()
+    : NaN;
+  const hasAttemptForTrigger = triggerOverdue
+    && Number.isFinite(attemptTimestamp)
+    && attemptTimestamp >= triggerTimestamp;
+  const budget = getNotificationBudget();
+  const hourlyRecent = db.get(
+    'SELECT COUNT(*) as count, MIN(last_shown) as oldest FROM tips WHERE last_shown IS NOT NULL AND archived_at IS NULL AND last_shown >= ?',
+    [Date.now() - 60 * 60 * 1000]
+  );
+  const hourlyBudget = {
+    exhausted: Boolean(hourlyRecent && hourlyRecent.count >= budget.maxPopupsPerHour),
+    currentCount: hourlyRecent?.count || 0,
+    maxPopupsPerHour: budget.maxPopupsPerHour,
+    nextAllowedAt: hourlyRecent?.count >= budget.maxPopupsPerHour && hourlyRecent?.oldest ? new Date(Number(hourlyRecent.oldest) + 60 * 60 * 1000).toISOString() : null
+  };
+  const waitingReason = triggerOverdue
+    ? (
+        hasAttemptForTrigger
+          ? (
+              popupDebugState.lastSchedulerAttempt.reason
+              || popupDebugState.lastSchedulerAttempt.result
+              || popupDebugState.lastSuppression?.reason
+              || 'trigger-attempt-recorded'
+            )
+          : 'timer-callback-pending'
+      )
+    : (triggerTime ? 'waiting-for-scheduled-trigger' : 'scheduler-not-scheduled');
 
   return {
     ...popupDebugState,
@@ -191,6 +601,43 @@ function getPopupDebugStateSnapshot() {
     trackedApplication: popupDebugState.lastTrackedMatch || popupDebugState.activeWindow,
     nextPopup,
     triggerTime,
+    popupExitOrder: buildPopupExitOrder(triggerTime),
+    usedPopupCount: hourlyBudget.currentCount,
+    hourlyLimit: hourlyBudget.maxPopupsPerHour,
+    nextAllowedAt: hourlyBudget.nextAllowedAt,
+    waitingReason: hourlyBudget.exhausted ? 'hourly-budget-exhausted' : waitingReason,
+    hourlyBudget,
+    selectionSettings: {
+      contextWeight: budget.contextMatchPercent / 100,
+      randomWeight: 1 - budget.contextMatchPercent / 100,
+      contextActive: Boolean(popupDebugState.lastTrackedMatch || lastActiveProcessName)
+    },
+    schedulerState: {
+      status: nextTrigger.schedulerStatus || (triggerTime ? 'scheduled' : 'idle'),
+      triggerTime,
+      overdue: triggerOverdue,
+      waitingReason: hourlyBudget.exhausted ? 'hourly-budget-exhausted' : waitingReason,
+      hourlyBudget,
+      lastAttempt: popupDebugState.lastSchedulerAttempt,
+      budgetLimit: nextTrigger.budgetLimit ?? hourlyBudget.maxPopupsPerHour,
+      budgetUsed: nextTrigger.budgetUsed ?? hourlyBudget.currentCount,
+      baseSlotMinutes: nextTrigger.baseSlotMinutes ?? null,
+      lastPopupAt: nextTrigger.lastPopupAt ?? null,
+      nextSlotAt: nextTrigger.nextSlotAt ?? triggerTime,
+      jitterMinutes: nextTrigger.jitterMinutes ?? 0,
+      scheduleReason: nextTrigger.scheduleReason ?? waitingReason,
+      budgetWindowStartAt: nextTrigger.budgetWindowStartAt ?? null,
+      budgetWindowEndAt: nextTrigger.budgetWindowEndAt ?? null
+    },
+    budgetLimit: nextTrigger.budgetLimit ?? hourlyBudget.maxPopupsPerHour,
+    budgetUsed: nextTrigger.budgetUsed ?? hourlyBudget.currentCount,
+    baseSlotMinutes: nextTrigger.baseSlotMinutes ?? null,
+    lastPopupAt: nextTrigger.lastPopupAt ?? null,
+    nextSlotAt: nextTrigger.nextSlotAt ?? triggerTime,
+    jitterMinutes: nextTrigger.jitterMinutes ?? 0,
+    scheduleReason: nextTrigger.scheduleReason ?? waitingReason,
+    audioDisabled: AUDIO_DISABLED,
+    audioSuppressed: AUDIO_DISABLED,
     queueScore: nextPopup && nextPopup.score !== undefined && nextPopup.score !== null
       ? nextPopup.score
       : (scoredCandidate ? scoredCandidate.score : null)
@@ -202,6 +649,250 @@ function getLocalDateKey(date = new Date()) {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+function parseStoredTimestamp(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getLocalStatisticsRange(mode = 'weekly', now = new Date()) {
+  const normalizedMode = mode === 'monthly' ? 'monthly' : 'weekly';
+  const current = new Date(now);
+  let start;
+  let endExclusive;
+  let rangeKind;
+  if (normalizedMode === 'monthly') {
+    start = new Date(current.getFullYear(), current.getMonth(), 1);
+    endExclusive = new Date(current.getFullYear(), current.getMonth() + 1, 1);
+    rangeKind = 'calendar-month';
+  } else {
+    endExclusive = new Date(current);
+    endExclusive.setHours(0, 0, 0, 0);
+    endExclusive.setDate(endExclusive.getDate() + 1);
+    start = new Date(endExclusive);
+    start.setDate(start.getDate() - 7);
+    rangeKind = 'rolling-local-days';
+  }
+  const dateKeys = [];
+  for (const cursor = new Date(start); cursor < endExclusive; cursor.setDate(cursor.getDate() + 1)) {
+    dateKeys.push(getLocalDateKey(cursor));
+  }
+  const days = dateKeys.length;
+  return {
+    mode: normalizedMode,
+    rangeKind,
+    days,
+    startAt: start.getTime(),
+    endAt: endExclusive.getTime(),
+    startDateKey: dateKeys[0],
+    endDateKey: dateKeys[dateKeys.length - 1],
+    dateKeys
+  };
+}
+
+function bucketLocalTimestamps(values, range) {
+  const counts = new Map(range.dateKeys.map(key => [key, 0]));
+  values.forEach(value => {
+    const timestamp = parseStoredTimestamp(value);
+    if (timestamp === null || timestamp < range.startAt || timestamp >= range.endAt) return;
+    const key = getLocalDateKey(new Date(timestamp));
+    if (counts.has(key)) counts.set(key, counts.get(key) + 1);
+  });
+  return range.dateKeys.map(date => ({ date, count: counts.get(date) || 0 }));
+}
+
+function buildStatisticsSnapshot(mode = 'weekly', now = new Date()) {
+  const range = getLocalStatisticsRange(mode, now);
+  const nowTimestamp = new Date(now).getTime();
+  const completionRows = db.query('SELECT last_completed_at FROM tips WHERE last_completed_at IS NOT NULL');
+  const dismissRows = db.query(
+    'SELECT reason, dismissed_at FROM dismiss_log WHERE dismissed_at >= ? AND dismissed_at < ? ORDER BY dismissed_at ASC',
+    [range.startAt, range.endAt]
+  );
+  const sessionRows = db.query(
+    'SELECT started_at, ended_at FROM sessions WHERE started_at < ? AND COALESCE(ended_at, started_at) >= ?',
+    [range.endAt, range.startAt]
+  );
+  const deadlineRows = db.query(`
+    SELECT t.id, t.subcategory_id, t.deadline,
+           s.is_sequential AS subcategory_is_sequential,
+           s.deadline_mode AS subcategory_deadline_mode,
+           s.shared_deadline AS subcategory_shared_deadline,
+           (
+             SELECT active_tip.id FROM tips active_tip
+             WHERE active_tip.subcategory_id = t.subcategory_id
+               AND active_tip.status NOT IN (${SEQUENTIAL_TERMINAL_STATUS_SQL}) AND active_tip.archived_at IS NULL
+             ORDER BY COALESCE(active_tip.order_index, 2147483647), active_tip.id LIMIT 1
+           ) AS sequential_active_tip_id
+    FROM tips t
+    LEFT JOIN subcategories s ON s.id = t.subcategory_id
+    WHERE t.status = 'active' AND t.archived_at IS NULL
+  `);
+  const categoryRows = db.query(`
+    SELECT c.id AS category_id, c.name AS category_name, c.color AS category_color,
+           t.id AS tip_id, t.status AS tip_status, t.last_completed_at
+    FROM categories c
+    LEFT JOIN tips t ON t.category_id = c.id AND t.archived_at IS NULL
+    ORDER BY c.name ASC, t.id ASC
+  `);
+  const completionTrend = bucketLocalTimestamps(completionRows.map(row => row.last_completed_at), range);
+  const snoozeTrend = bucketLocalTimestamps(dismissRows.map(row => row.dismissed_at), range);
+  const reasonCounts = new Map();
+  dismissRows.forEach(row => {
+    const reason = row.reason || 'unspecified';
+    reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1);
+  });
+  const totalFocusMs = sessionRows.reduce((sum, row) => {
+    const startedAt = parseStoredTimestamp(row.started_at);
+    const endedAt = parseStoredTimestamp(row.ended_at);
+    return startedAt !== null && endedAt !== null && endedAt > startedAt
+      ? sum + (endedAt - startedAt)
+      : sum;
+  }, 0);
+  const completedInRange = completionTrend.reduce((sum, day) => sum + day.count, 0);
+  const deadlineItems = deadlineRows.map(row => {
+    const info = getEffectiveDeadlineInfo(row, nowTimestamp);
+    return {
+      tipId: row.id,
+      effectiveDeadline: info.effectiveDeadline,
+      deadlineSource: info.deadlineSource,
+      deadlineState: info.deadlineState,
+      isSequential: info.isSequential,
+      sequentialActiveTipId: info.sequentialActiveTipId,
+      isSequentialActiveStep: info.isSequentialActiveStep
+    };
+  });
+  const deadlineStateCounts = deadlineItems.reduce((counts, item) => {
+    counts[item.deadlineState] = (counts[item.deadlineState] || 0) + 1;
+    return counts;
+  }, {});
+  const categoryMap = new Map();
+  categoryRows.forEach(row => {
+    if (!categoryMap.has(row.category_id)) {
+      categoryMap.set(row.category_id, {
+        categoryId: row.category_id,
+        name: row.category_name,
+        color: row.category_color,
+        totalTips: 0,
+        activeTips: 0,
+        doneTips: 0,
+        cancelledTips: 0,
+        periodCompletedTips: 0
+      });
+    }
+    const category = categoryMap.get(row.category_id);
+    if (row.tip_id === null || row.tip_id === undefined) return;
+    category.totalTips += 1;
+    if (row.tip_status === 'active') category.activeTips += 1;
+    if (row.tip_status === 'done') category.doneTips += 1;
+    if (row.tip_status === 'cancelled') category.cancelledTips += 1;
+    const completedAt = parseStoredTimestamp(row.last_completed_at);
+    if (completedAt !== null && completedAt >= range.startAt && completedAt < range.endAt) {
+      category.periodCompletedTips += 1;
+    }
+  });
+  const categoryDistribution = Array.from(categoryMap.values()).map(category => ({
+    ...category,
+    completionRate: category.totalTips > 0 ? category.doneTips / category.totalTips : 0
+  }));
+  const snoozeReasons = Array.from(reasonCounts, ([reason, count]) => ({ reason, count }))
+    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
+  const averageFocusMinutes = sessionRows.length ? Math.round(totalFocusMs / sessionRows.length / 60000) : 0;
+  const hasData = completedInRange > 0 || dismissRows.length > 0 || sessionRows.length > 0 || categoryDistribution.length > 0;
+  const status = hasData ? 'ready' : 'empty';
+  const completed = { period: completedInRange, total: completionRows.length, trend: completionTrend };
+  const deadlines = { counts: deadlineStateCounts, items: deadlineItems };
+  const data = {
+    completed,
+    procrastinationTrend: snoozeTrend,
+    snoozeTrend,
+    snoozeReasons,
+    categoryDistribution,
+    deadlines,
+    averageFocusMinutes
+  };
+
+  return {
+    ok: true,
+    status,
+    loading: false,
+    empty: !hasData,
+    error: null,
+    mode: range.mode,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || null,
+    range: {
+      days: range.days,
+      kind: range.rangeKind,
+      startAt: range.startAt,
+      endAt: range.endAt,
+      startDateKey: range.startDateKey,
+      endDateKey: range.endDateKey
+    },
+    completed,
+    procrastinationTrend: snoozeTrend,
+    snoozeTrend,
+    snoozeReasons,
+    categoryDistribution,
+    deadlines,
+    averageFocusMinutes,
+    hasData,
+    data
+  };
+}
+
+function buildStatisticsErrorResponse(mode, error) {
+  const normalizedMode = mode === 'monthly' ? 'monthly' : 'weekly';
+  return {
+    ok: false,
+    status: 'error',
+    loading: false,
+    empty: true,
+    mode: normalizedMode,
+    range: null,
+    completed: null,
+    procrastinationTrend: [],
+    snoozeTrend: [],
+    snoozeReasons: [],
+    categoryDistribution: [],
+    deadlines: { counts: {}, items: [] },
+    averageFocusMinutes: 0,
+    hasData: false,
+    data: null,
+    error: { code: 'statistics-query-failed', message: error.message }
+  };
+}
+
+function buildDashboardWeeklyProgress(now = new Date()) {
+  const current = new Date(now);
+  current.setHours(0, 0, 0, 0);
+  const mondayOffset = (current.getDay() + 6) % 7;
+  const start = new Date(current);
+  start.setDate(start.getDate() - mondayOffset);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 7);
+  const range = {
+    startAt: start.getTime(),
+    endAt: end.getTime(),
+    dateKeys: Array.from({ length: 7 }, (_, index) => {
+      const date = new Date(start);
+      date.setDate(date.getDate() + index);
+      return getLocalDateKey(date);
+    })
+  };
+  const rows = db.query('SELECT last_completed_at FROM tips WHERE last_completed_at IS NOT NULL');
+  const trend = bucketLocalTimestamps(rows.map(row => row.last_completed_at), range);
+  return {
+    ok: true,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || null,
+    range: { startAt: range.startAt, endAt: range.endAt, startDateKey: range.dateKeys[0], endDateKey: range.dateKeys[6] },
+    trend,
+    total: trend.reduce((sum, day) => sum + day.count, 0),
+    hasData: trend.some(day => day.count > 0)
+  };
 }
 
 function createCheckinWindow() {
@@ -399,6 +1090,7 @@ function sendPopupItem(win, item) {
           last_shown = ?
       WHERE id = ?
     `, [Date.now(), item.markShownTipId]);
+    rescheduleRandomPopup();
   }
 
   win.show();
@@ -740,12 +1432,17 @@ function isFullscreenActive() {
 }
 
 const DEFAULT_NOTIFICATION_BUDGET = {
-  maxPopupsPerHour: 3,
+  maxPopupsPerHour: 5,
   minimumPopupIntervalMinutes: 15,
   sameTaskCooldownMinutes: 45,
   quietHoursEnabled: false,
   quietHoursStart: '00:00',
-  quietHoursEnd: '10:00'
+  quietHoursEnd: '10:00',
+  contextMatchPercent: 70,
+  importanceExponent: 1.35,
+  stalenessHours: 24,
+  stalenessMaxBoost: 2,
+  deadlineBoost: 1
 };
 
 function getSettingNumber(key, fallback) {
@@ -767,7 +1464,12 @@ function getNotificationBudget() {
     sameTaskCooldownMinutes: getSettingNumber('notification_same_task_cooldown_minutes', DEFAULT_NOTIFICATION_BUDGET.sameTaskCooldownMinutes),
     quietHoursEnabled: getSettingBool('notification_quiet_hours_enabled', DEFAULT_NOTIFICATION_BUDGET.quietHoursEnabled),
     quietHoursStart: (db.get('SELECT value FROM settings WHERE key = ?', ['notification_quiet_hours_start']) || {}).value || DEFAULT_NOTIFICATION_BUDGET.quietHoursStart,
-    quietHoursEnd: (db.get('SELECT value FROM settings WHERE key = ?', ['notification_quiet_hours_end']) || {}).value || DEFAULT_NOTIFICATION_BUDGET.quietHoursEnd
+    quietHoursEnd: (db.get('SELECT value FROM settings WHERE key = ?', ['notification_quiet_hours_end']) || {}).value || DEFAULT_NOTIFICATION_BUDGET.quietHoursEnd,
+    contextMatchPercent: Math.max(0, Math.min(100, getSettingNumber('popup_selection_context_match_percent', DEFAULT_NOTIFICATION_BUDGET.contextMatchPercent))),
+    importanceExponent: Math.max(0.1, getSettingNumber('popup_selection_importance_exponent', DEFAULT_NOTIFICATION_BUDGET.importanceExponent)),
+    stalenessHours: Math.max(1, getSettingNumber('popup_selection_staleness_hours', DEFAULT_NOTIFICATION_BUDGET.stalenessHours)),
+    stalenessMaxBoost: Math.max(0, getSettingNumber('popup_selection_staleness_max_boost', DEFAULT_NOTIFICATION_BUDGET.stalenessMaxBoost)),
+    deadlineBoost: Math.max(0, getSettingNumber('popup_selection_deadline_boost', DEFAULT_NOTIFICATION_BUDGET.deadlineBoost))
   };
 }
 
@@ -816,8 +1518,9 @@ function calculateTipScore(tip, now = Date.now()) {
     score += 30;
   }
 
-  if (tip.deadline) {
-    const deadlineTime = new Date(tip.deadline).getTime();
+  const deadlineInfo = getEffectiveDeadlineInfo(tip);
+  if (deadlineInfo.effectiveDeadline) {
+    const deadlineTime = new Date(deadlineInfo.effectiveDeadline).getTime();
     if (!Number.isNaN(deadlineTime)) {
       const daysLeft = (deadlineTime - now) / (24 * 60 * 60 * 1000);
       if (daysLeft <= 1) score += 45;
@@ -829,6 +1532,72 @@ function calculateTipScore(tip, now = Date.now()) {
     score -= 100;
   }
   return score;
+}
+
+function getTipSelectionMetadata(tip) {
+  if (!tip) return { isSequential: false, sequentialActiveTipId: null };
+  const hasJoinedMetadata = Object.prototype.hasOwnProperty.call(tip, 'subcategory_is_sequential');
+  let metadata = tip;
+  if (!hasJoinedMetadata && tip.id) {
+    metadata = db.get(`
+      SELECT t.id,
+             t.subcategory_id,
+             t.deadline,
+             s.is_sequential AS subcategory_is_sequential,
+             s.deadline_mode AS subcategory_deadline_mode,
+             s.shared_deadline AS subcategory_shared_deadline,
+             (
+               SELECT active_tip.id
+               FROM tips active_tip
+               WHERE active_tip.subcategory_id = t.subcategory_id
+                 AND active_tip.status NOT IN (${SEQUENTIAL_TERMINAL_STATUS_SQL})
+                 AND active_tip.archived_at IS NULL
+               ORDER BY COALESCE(active_tip.order_index, 2147483647), active_tip.id
+               LIMIT 1
+             ) AS sequential_active_tip_id
+      FROM tips t
+      LEFT JOIN subcategories s ON s.id = t.subcategory_id
+      WHERE t.id = ?
+    `, [tip.id]) || tip;
+  }
+
+  const isSequential = Number(metadata.subcategory_is_sequential || 0) === 1;
+  const sequentialActiveTipId = metadata.sequential_active_tip_id === null || metadata.sequential_active_tip_id === undefined
+    ? null
+    : Number(metadata.sequential_active_tip_id);
+  return {
+    isSequential,
+    sequentialActiveTipId,
+    isSequentialActiveStep: !isSequential || sequentialActiveTipId === Number(tip.id),
+    deadlineMode: metadata.subcategory_deadline_mode || null,
+    sharedDeadline: metadata.subcategory_shared_deadline || null
+  };
+}
+
+function getEffectiveDeadlineInfo(tip, now = Date.now()) {
+  const metadata = getTipSelectionMetadata(tip);
+  const usesSharedDeadline = metadata.deadlineMode === 'shared' && Boolean(metadata.sharedDeadline);
+  const effectiveDeadline = usesSharedDeadline ? metadata.sharedDeadline : (tip?.deadline || null);
+  const deadlineTime = effectiveDeadline ? new Date(effectiveDeadline).getTime() : NaN;
+  let deadlineState = 'none';
+  let deadlineDaysRemaining = null;
+  if (effectiveDeadline && !Number.isFinite(deadlineTime)) {
+    deadlineState = 'invalid';
+  } else if (Number.isFinite(deadlineTime)) {
+    deadlineDaysRemaining = (deadlineTime - now) / 86400000;
+    if (deadlineDaysRemaining < 0) deadlineState = 'overdue';
+    else if (deadlineDaysRemaining <= 1) deadlineState = 'due-today';
+    else if (deadlineDaysRemaining <= 3) deadlineState = 'due-soon';
+    else if (deadlineDaysRemaining <= 7) deadlineState = 'due-this-week';
+    else deadlineState = 'due-later';
+  }
+  return {
+    ...metadata,
+    effectiveDeadline,
+    deadlineSource: usesSharedDeadline ? 'subcategory-shared' : (effectiveDeadline ? 'tip' : 'none'),
+    deadlineState,
+    deadlineDaysRemaining
+  };
 }
 
 function calculateNextRecurringDue(tip, from = new Date()) {
@@ -872,18 +1641,66 @@ function maybeApplyRecurringCompletion(sql, params = []) {
 }
 
 function getCompletedStatusTipId(sql, params = []) {
-  const sqlUpper = String(sql || '').toUpperCase();
+  const mutation = getTipStatusMutation(sql, params);
+  return mutation?.status === 'done' ? mutation.tipId : null;
+}
+
+function getTipStatusMutation(sql, params = []) {
+  const sqlText = String(sql || '');
+  const sqlUpper = sqlText.toUpperCase();
   if (!sqlUpper.includes('UPDATE TIPS') || !sqlUpper.includes('STATUS')) return null;
-
-  let tipId = null;
-  const statusParamIndex = params.findIndex(value => String(value).toLowerCase() === 'done');
-  if (statusParamIndex !== -1) {
-    tipId = params[statusParamIndex + 1] || params[params.length - 1];
-  } else if (sqlUpper.includes("STATUS = 'DONE'") || sqlUpper.includes('STATUS = "DONE"')) {
-    tipId = params[params.length - 1];
+  const allowedStatuses = ['active', 'retired', ...SEQUENTIAL_TERMINAL_STATUSES];
+  const statusParamIndex = params.findIndex(value => allowedStatuses.includes(String(value).toLowerCase()));
+  let status = statusParamIndex >= 0 ? String(params[statusParamIndex]).toLowerCase() : null;
+  if (!status) {
+    const literalMatch = /STATUS\s*=\s*['"](active|retired|done|cancelled)['"]/i.exec(sqlText);
+    status = literalMatch ? literalMatch[1].toLowerCase() : null;
   }
+  if (!status) return null;
+  const tipId = params[params.length - 1];
+  return tipId === null || tipId === undefined ? null : { tipId, status };
+}
 
-  return tipId || null;
+function applySequentialStatusProgression(sql, params = [], recurringRescheduled = false) {
+  const mutation = getTipStatusMutation(sql, params);
+  if (!mutation || recurringRescheduled || !SEQUENTIAL_TERMINAL_STATUSES.includes(mutation.status)) return null;
+  const tip = db.get(`
+    SELECT t.id, t.subcategory_id, s.is_sequential
+    FROM tips t
+    LEFT JOIN subcategories s ON s.id = t.subcategory_id
+    WHERE t.id = ?
+  `, [mutation.tipId]);
+  if (!tip || !tip.subcategory_id || Number(tip.is_sequential || 0) !== 1) return null;
+
+  const removedQueueItems = [];
+  popupQueue = popupQueue.filter(item => {
+    const queuedTipId = item.data && (item.data.tipId || item.data.id);
+    if (Number(queuedTipId) !== Number(mutation.tipId)) return true;
+    popupQueuedKeys.delete(item.key);
+    removedQueueItems.push(item.key);
+    return false;
+  });
+  const nextStep = db.get(`
+    SELECT id, status, order_index
+    FROM tips
+    WHERE subcategory_id = ?
+      AND archived_at IS NULL
+      AND status NOT IN (${SEQUENTIAL_TERMINAL_STATUS_SQL})
+    ORDER BY COALESCE(order_index, 2147483647), id
+    LIMIT 1
+  `, [tip.subcategory_id]);
+  const progression = {
+    subcategoryId: tip.subcategory_id,
+    terminalTipId: Number(mutation.tipId),
+    terminalStatus: mutation.status,
+    nextStepId: nextStep?.id || null,
+    nextStepStatus: nextStep?.status || null,
+    nextActiveTipId: nextStep?.status === 'active' ? nextStep.id : null,
+    removedQueueItems,
+    progressedAt: new Date().toISOString()
+  };
+  updatePopupDebugState({ lastSequentialProgression: progression });
+  return progression;
 }
 
 function markCompletionTimestampIfNeeded(sql, params = [], recurringRescheduled = false) {
@@ -896,48 +1713,133 @@ function markCompletionTimestampIfNeeded(sql, params = [], recurringRescheduled 
   return true;
 }
 
+function getSelectionEligibility(tip, budget, now = Date.now()) {
+  const metadata = getTipSelectionMetadata(tip);
+  if (metadata.isSequential && !metadata.isSequentialActiveStep) return 'sequential-step-locked';
+  const deadlineInfo = getEffectiveDeadlineInfo(tip, now);
+  if (deadlineInfo.deadlineState === 'overdue') return 'deadline-expired';
+  const importance = Number(tip.importance || 1);
+  if (importance < 9 && (isFullscreenActive() || isGameModeActive())) return 'fullscreen-or-game-mode';
+  if (importance < 10 && isQuietHoursActive(budget)) return 'quiet-hours';
+  if (tip.last_shown && now - Number(tip.last_shown) < budget.sameTaskCooldownMinutes * 60 * 1000) return 'same-task-cooldown';
+  const lastPopup = db.get('SELECT MAX(last_shown) as last_shown FROM tips WHERE last_shown IS NOT NULL AND archived_at IS NULL');
+  if (importance < 10 && lastPopup?.last_shown && now - Number(lastPopup.last_shown) < budget.minimumPopupIntervalMinutes * 60 * 1000) return 'minimum-popup-interval';
+  const recent = db.get('SELECT COUNT(*) as count FROM tips WHERE last_shown IS NOT NULL AND archived_at IS NULL AND last_shown >= ?', [now - 60 * 60 * 1000]);
+  if (importance < 10 && recent && recent.count >= budget.maxPopupsPerHour) return 'hourly-budget-exhausted';
+  return null;
+}
+
+function getPopupSelectionFactors(tip, budget, now = Date.now()) {
+  const importanceWeight = Math.pow(Math.max(1, Number(tip.importance || 1)), budget.importanceExponent);
+  const trackingApp = String(tip.tip_tracking_app || '').trim().toLowerCase();
+  const contextMatch = Boolean((popupDebugState.lastTrackedMatch && tip.category_id === popupDebugState.lastTrackedMatch.categoryId) || (trackingApp && lastActiveProcessName.includes(trackingApp)));
+  const lastShown = Number(tip.last_shown || 0);
+  const staleHours = lastShown > 0 ? Math.max(0, (now - lastShown) / 3600000) : budget.stalenessHours * budget.stalenessMaxBoost;
+  const stalenessBoost = 1 + Math.min(budget.stalenessMaxBoost, staleHours / budget.stalenessHours);
+  const deadlineInfo = getEffectiveDeadlineInfo(tip, now);
+  let deadlineMultiplier = 1;
+  if (deadlineInfo.deadlineState === 'due-today') {
+    deadlineMultiplier += budget.deadlineBoost;
+  } else if (deadlineInfo.deadlineState === 'due-soon') {
+    deadlineMultiplier += budget.deadlineBoost * 0.6;
+  } else if (deadlineInfo.deadlineState === 'due-this-week') {
+    deadlineMultiplier += budget.deadlineBoost * 0.3;
+  }
+  return {
+    importanceWeight,
+    contextMatch,
+    stalenessBoost,
+    deadlineMultiplier,
+    deadlineBoostApplied: deadlineMultiplier - 1,
+    ...deadlineInfo
+  };
+}
+
+function selectWeightedPopupCandidate(tips, source) {
+  const budget = getNotificationBudget();
+  const now = Date.now();
+  const diagnosed = tips.map(tip => {
+    const suppressionReason = getSelectionEligibility(tip, budget, now);
+    const factors = getPopupSelectionFactors(tip, budget, now);
+    return { ...tip, ...factors, suppressionReason, finalWeight: factors.importanceWeight * factors.stalenessBoost * factors.deadlineMultiplier };
+  });
+  const eligible = diagnosed.filter(tip => !tip.suppressionReason);
+  const contextCandidates = eligible.filter(tip => tip.contextMatch);
+  const generalCandidates = eligible.filter(tip => !tip.contextMatch);
+  const debugSeed = getSettingNumber('popup_selection_debug_seed', -1);
+  const nextRandom = () => {
+    if (debugSeed < 0) return Math.random();
+    popupSelectionSequence += 1;
+    const value = Math.sin(debugSeed + popupSelectionSequence) * 10000;
+    return value - Math.floor(value);
+  };
+  const contextRoll = nextRandom();
+  const chooseContext = contextCandidates.length > 0 && (generalCandidates.length === 0 || contextRoll < budget.contextMatchPercent / 100);
+  const pool = chooseContext ? contextCandidates : (generalCandidates.length ? generalCandidates : contextCandidates);
+  const totalWeight = pool.reduce((sum, tip) => sum + tip.finalWeight, 0);
+  const contextTotalWeight = contextCandidates.reduce((sum, tip) => sum + tip.finalWeight, 0);
+  const generalTotalWeight = generalCandidates.reduce((sum, tip) => sum + tip.finalWeight, 0);
+  const contextShare = contextCandidates.length && generalCandidates.length
+    ? budget.contextMatchPercent / 100
+    : (contextCandidates.length ? 1 : 0);
+  const generalShare = generalCandidates.length
+    ? (contextCandidates.length ? 1 - contextShare : 1)
+    : 0;
+  const expectedProbability = tip => {
+    if (tip.suppressionReason) return 0;
+    if (tip.contextMatch) return contextTotalWeight > 0 ? contextShare * tip.finalWeight / contextTotalWeight : 0;
+    return generalTotalWeight > 0 ? generalShare * tip.finalWeight / generalTotalWeight : 0;
+  };
+  const lastPopup = db.get('SELECT MAX(last_shown) as last_shown FROM tips WHERE last_shown IS NOT NULL AND archived_at IS NULL');
+  const weightRoll = nextRandom();
+  let roll = weightRoll * totalWeight;
+  let selected = pool[pool.length - 1] || null;
+  for (const tip of pool) { roll -= tip.finalWeight; if (roll <= 0) { selected = tip; break; } }
+  updatePopupDebugState({
+    lastScoring: {
+      source,
+      candidateCount: diagnosed.length,
+      selected: summarizeTipForDebug(selected),
+      candidates: diagnosed.slice().sort((a, b) => b.finalWeight - a.finalWeight).slice(0, 20).map(tip => {
+        const probability = expectedProbability(tip);
+        return {
+          ...summarizeTipForDebug(tip),
+          finalWeight: tip.finalWeight,
+          probability,
+          finalProbability: probability,
+          importanceWeight: tip.importanceWeight,
+          contextMatch: tip.contextMatch,
+          stalenessBoost: tip.stalenessBoost,
+          deadlineMultiplier: tip.deadlineMultiplier,
+          deadlineBoostApplied: tip.deadlineBoostApplied,
+          effectiveDeadline: tip.effectiveDeadline,
+          deadlineSource: tip.deadlineSource,
+          deadlineState: tip.deadlineState,
+          deadlineDaysRemaining: tip.deadlineDaysRemaining,
+          isSequential: tip.isSequential,
+          sequentialActiveTipId: tip.sequentialActiveTipId,
+          isSequentialActiveStep: tip.isSequentialActiveStep,
+          cooldownRemaining: getCooldownRemainingMinutes(tip, budget, now, lastPopup?.last_shown),
+          suppressionReason: tip.suppressionReason
+        };
+      }),
+      selection: { contextRoll, weightRoll, selectedGroup: chooseContext ? 'context' : 'general', contextMatchPercent: budget.contextMatchPercent, debugSeed: debugSeed >= 0 ? debugSeed : null, sequence: popupSelectionSequence },
+      scoredAt: new Date().toISOString()
+    }
+  });
+  if (!selected && diagnosed.length && diagnosed.every(tip => tip.suppressionReason === 'hourly-budget-exhausted')) {
+    const recent = db.get('SELECT COUNT(*) as count, MIN(last_shown) as oldest FROM tips WHERE last_shown IS NOT NULL AND archived_at IS NULL AND last_shown >= ?', [now - 60 * 60 * 1000]);
+    updatePopupDebugState({ lastSuppression: { reason: 'hourly-budget-exhausted', source, currentCount: recent?.count || 0, maxPopupsPerHour: budget.maxPopupsPerHour, nextAllowedAt: recent?.count >= budget.maxPopupsPerHour && recent?.oldest ? new Date(Number(recent.oldest) + 3600000).toISOString() : null } });
+  }
+  return selected;
+}
 function canShowPopupForTip(tip) {
   if (!tip || tip.isRetiredCheck) return true;
   const budget = getNotificationBudget();
-  const now = Date.now();
-  const importance = Number(tip.importance || 1);
-
-  if (importance < 9 && (isFullscreenActive() || isGameModeActive())) {
-    updatePopupDebugState({ lastSuppression: { reason: 'fullscreen-or-game-mode', tip: summarizeTipForDebug(tip) } });
-    return false;
-  }
-
-  if (importance < 10 && isQuietHoursActive(budget)) {
-    updatePopupDebugState({ lastSuppression: { reason: 'quiet-hours', tip: summarizeTipForDebug(tip) } });
-    return false;
-  }
-
-  if (tip.last_shown && now - Number(tip.last_shown) < budget.sameTaskCooldownMinutes * 60 * 1000) {
-    updatePopupDebugState({ lastSuppression: { reason: 'same-task-cooldown', tip: summarizeTipForDebug(tip) } });
-    return false;
-  }
-
-  const lastPopup = db.get(`
-    SELECT MAX(last_shown) as last_shown
-    FROM tips
-    WHERE last_shown IS NOT NULL AND archived_at IS NULL
-  `);
-  if (importance < 10 && lastPopup?.last_shown && now - Number(lastPopup.last_shown) < budget.minimumPopupIntervalMinutes * 60 * 1000) {
-    updatePopupDebugState({ lastSuppression: { reason: 'minimum-popup-interval', tip: summarizeTipForDebug(tip) } });
-    return false;
-  }
-
-  const recent = db.get(`
-    SELECT COUNT(*) as count
-    FROM tips
-    WHERE last_shown IS NOT NULL AND archived_at IS NULL AND last_shown >= ?
-  `, [now - 60 * 60 * 1000]);
-  if (importance < 10 && recent && recent.count >= budget.maxPopupsPerHour) {
-    updatePopupDebugState({ lastSuppression: { reason: 'max-popups-per-hour', tip: summarizeTipForDebug(tip), recentCount: recent.count } });
-    return false;
-  }
-
-  return true;
+  const suppressionReason = getSelectionEligibility(tip, budget, Date.now());
+  if (!suppressionReason) return true;
+  updatePopupDebugState({ lastSuppression: { reason: suppressionReason, tip: summarizeTipForDebug(tip) } });
+  return false;
 }
 
 function selectTipFromCategory(categoryId) {
@@ -946,9 +1848,19 @@ function selectTipFromCategory(categoryId) {
 
   // Get active tips from this category, excluding recently shown or snoozed notes.
   const tips = db.query(`
-    SELECT t.*, c.name as category_name, c.color as category_color
+    SELECT t.*, c.name as category_name, c.color as category_color,
+           s.is_sequential AS subcategory_is_sequential,
+           s.deadline_mode AS subcategory_deadline_mode,
+           s.shared_deadline AS subcategory_shared_deadline,
+           (
+             SELECT active_tip.id FROM tips active_tip
+             WHERE active_tip.subcategory_id = t.subcategory_id
+               AND active_tip.status NOT IN (${SEQUENTIAL_TERMINAL_STATUS_SQL}) AND active_tip.archived_at IS NULL
+             ORDER BY COALESCE(active_tip.order_index, 2147483647), active_tip.id LIMIT 1
+           ) AS sequential_active_tip_id
     FROM tips t
     JOIN categories c ON t.category_id = c.id
+    LEFT JOIN subcategories s ON s.id = t.subcategory_id
     WHERE t.category_id = ?
       AND t.status = 'active'
       AND t.archived_at IS NULL
@@ -968,12 +1880,13 @@ function selectTipFromCategory(categoryId) {
         AND t.archived_at IS NULL
     `, [categoryId]);
 
-    if (retiredTips.length === 0) {
+    const eligibleRetiredTips = retiredTips.filter(tip => getEffectiveDeadlineInfo(tip).deadlineState !== 'overdue');
+    if (eligibleRetiredTips.length === 0) {
       return null;
     }
 
     // Return a retired tip with "Hâlâ yapıyor musun?" message
-    const retiredTip = retiredTips[Math.floor(Math.random() * retiredTips.length)];
+    const retiredTip = eligibleRetiredTips[Math.floor(Math.random() * eligibleRetiredTips.length)];
     return {
       ...retiredTip,
       content: `Hâlâ "${retiredTip.category_name}" konusuyla ilgileniyor musun?`,
@@ -981,31 +1894,16 @@ function selectTipFromCategory(categoryId) {
     };
   }
 
-  const scoredTips = tips
-    .map(tip => ({ ...tip, score: calculateTipScore(tip) }))
-    .sort((a, b) => b.score - a.score);
-  const selectedTip = scoredTips[0];
-
-  updatePopupDebugState({
-    lastScoring: {
-      source: 'category-title-match',
-      categoryId,
-      candidateCount: scoredTips.length,
-      selected: summarizeTipForDebug(selectedTip),
-      candidates: scoredTips.slice(0, 10).map(summarizeTipForDebug),
-      scoredAt: new Date().toISOString()
-    }
-  });
-
-  return selectedTip;
+  return selectWeightedPopupCandidate(tips, 'category-title-match');
 }
 
 function showPopupWithTip(tip, category) {
   if (!canShowPopupForTip(tip)) {
-    console.log('[NotificationBudget] Popup suppressed by budget rules', { tipId: tip && tip.id });
     return false;
   }
 
+  const eventRoute = getPopupEventRoute(tip.importance, tip.id);
+  const deadlineInfo = getEffectiveDeadlineInfo(tip);
   const tipData = {
     id: tip.id,
     tipId: tip.id,
@@ -1015,7 +1913,15 @@ function showPopupWithTip(tip, category) {
     },
     content: tip.content,
     importance: tip.importance,
-    isRetiredCheck: tip.isRetiredCheck || false
+    isRetiredCheck: tip.isRetiredCheck || false,
+    deadline: deadlineInfo.effectiveDeadline,
+    effectiveDeadline: deadlineInfo.effectiveDeadline,
+    deadlineSource: deadlineInfo.deadlineSource,
+    deadlineState: deadlineInfo.deadlineState,
+    isSequential: deadlineInfo.isSequential,
+    sequentialActiveTipId: deadlineInfo.sequentialActiveTipId,
+    isSequentialActiveStep: deadlineInfo.isSequentialActiveStep,
+    ...eventRoute
   };
 
   return enqueuePopup({
@@ -1028,41 +1934,153 @@ function showPopupWithTip(tip, category) {
 
 // Random "N'aber?" Popup
 function startRandomPopupTracking() {
+  if (!randomPopupSchedulerStartedAt) {
+    randomPopupSchedulerStartedAt = Date.now();
+  }
+  scheduleRandomPopup();
+}
+
+function rescheduleRandomPopup() {
+  if (!randomPopupSchedulerStartedAt) return;
+  if (randomPopupInterval) clearTimeout(randomPopupInterval);
+  randomPopupInterval = null;
   scheduleRandomPopup();
 }
 
 function scheduleRandomPopup() {
-  // Random interval between 30-90 minutes (15-45 minutes if focus mode is active)
-  const minInterval = focusMode ? 15 * 60 * 1000 : 30 * 60 * 1000;
-  const maxInterval = focusMode ? 45 * 60 * 1000 : 90 * 60 * 1000;
-  const randomInterval = Math.floor(Math.random() * (maxInterval - minInterval + 1)) + minInterval;
+  const now = Date.now();
+  const budget = getNotificationBudget();
+  const recentPopupRows = db.query(`
+    SELECT last_shown
+    FROM tips
+    WHERE last_shown IS NOT NULL
+      AND archived_at IS NULL
+      AND last_shown >= ?
+    ORDER BY last_shown ASC
+  `, [now - 60 * 60 * 1000]);
+  const lastPopup = db.get(`
+    SELECT MAX(last_shown) as last_shown
+    FROM tips
+    WHERE last_shown IS NOT NULL AND archived_at IS NULL
+  `);
+  const schedule = calculateNextPopupSchedule({
+    now,
+    schedulerStartedAt: randomPopupSchedulerStartedAt || now,
+    lastPopupAt: lastPopup?.last_shown,
+    recentPopupTimestamps: recentPopupRows.map(row => row.last_shown),
+    maxPopupsPerHour: budget.maxPopupsPerHour
+  });
+  const lastPopupAt = lastPopup?.last_shown ? Number(lastPopup.last_shown) : null;
+  const previousAttempt = popupDebugState.lastSchedulerAttempt;
+  const scheduleReason = schedule.rollingWindowAvailableAt
+    ? 'hourly-budget-exhausted'
+    : (previousAttempt?.result === 'no-eligible-tip' ? 'no-eligible-candidate-retry' : 'budget-slot');
+  const schedulerScheduledAt = new Date(now).toISOString();
   updatePopupDebugState({
     nextTrigger: {
-      randomPopupAt: new Date(Date.now() + randomInterval).toISOString(),
-      randomIntervalMs: randomInterval,
+      ...(popupDebugState.nextTrigger || {}),
+      randomPopupAt: new Date(schedule.nextPopupAt).toISOString(),
+      randomIntervalMs: schedule.delayMs,
+      slotIntervalMs: schedule.slotIntervalMs,
+      schedulerAnchorAt: new Date(schedule.anchorAt).toISOString(),
+      schedulerStartedAt: new Date(randomPopupSchedulerStartedAt || now).toISOString(),
+      usedPopupCount: schedule.usedPopupCount,
+      maxPopupsPerHour: schedule.maxPopupsPerHour,
+      rollingWindowAvailableAt: schedule.rollingWindowAvailableAt
+        ? new Date(schedule.rollingWindowAvailableAt).toISOString()
+        : null,
+      budgetLimit: schedule.maxPopupsPerHour,
+      budgetUsed: schedule.usedPopupCount,
+      baseSlotMinutes: schedule.slotIntervalMs / 60000,
+      lastPopupAt: lastPopupAt ? new Date(lastPopupAt).toISOString() : null,
+      nextSlotAt: new Date(schedule.nextPopupAt).toISOString(),
+      jitterMinutes: 0,
+      scheduleReason,
+      budgetWindowStartAt: new Date(schedule.windowStartAt).toISOString(),
+      budgetWindowEndAt: new Date(schedule.windowEndAt).toISOString(),
+      schedulerStatus: 'scheduled',
+      schedulerScheduledAt,
       titleCheckIntervalMs: focusMode ? 2500 : 5000,
       focusMode: focusMode ? { categoryId: focusMode.categoryId, categoryName: focusMode.categoryName } : null
     }
   });
 
   randomPopupInterval = setTimeout(() => {
-    // Check if fullscreen is active before showing
-    if (!isFullscreenActive()) {
-      showRandomPopup();
+    const triggeredAt = new Date().toISOString();
+    updatePopupDebugState({
+      nextTrigger: {
+        ...(popupDebugState.nextTrigger || {}),
+        randomPopupAt: null,
+        schedulerStatus: 'triggering',
+        schedulerTriggeredAt: triggeredAt
+      },
+      lastSchedulerAttempt: {
+        source: 'random-scheduler',
+        result: 'triggering',
+        attemptedAt: triggeredAt
+      }
+    });
+
+    try {
+      // Check if fullscreen is active before showing
+      if (!isFullscreenActive()) {
+        showRandomPopup('random-scheduler', triggeredAt);
+      } else {
+        updatePopupDebugState({
+          lastSuppression: {
+            reason: 'fullscreen-random-schedule',
+            source: 'random-scheduler',
+            suppressedAt: triggeredAt
+          },
+          lastSchedulerAttempt: {
+            source: 'random-scheduler',
+            result: 'suppressed',
+            reason: 'fullscreen-random-schedule',
+            attemptedAt: triggeredAt
+          }
+        });
+      }
+    } catch (error) {
+      console.error('Error in random popup scheduler:', error);
+      updatePopupDebugState({
+        lastSuppression: {
+          reason: 'random-scheduler-error',
+          error: error.message,
+          failedAt: new Date().toISOString()
+        },
+        lastSchedulerAttempt: {
+          source: 'random-scheduler',
+          result: 'error',
+          error: error.message,
+          attemptedAt: triggeredAt
+        }
+      });
+    } finally {
+      randomPopupInterval = null;
+      // Budget suppression only skips this attempt; it must never stop the scheduler.
+      scheduleRandomPopup();
     }
-    // Schedule next popup
-    scheduleRandomPopup();
-  }, randomInterval);
+  }, schedule.delayMs);
 }
 
-function showRandomPopup() {
+function showRandomPopup(source = 'random-scheduler', attemptedAt = new Date().toISOString()) {
   // Get any active tip that hasn't been shown in the last hour
   const oneHourAgo = Date.now() - (60 * 60 * 1000);
 
   let query = `
-    SELECT t.*, c.name as category_name, c.color as category_color
+    SELECT t.*, c.name as category_name, c.color as category_color,
+           s.is_sequential AS subcategory_is_sequential,
+           s.deadline_mode AS subcategory_deadline_mode,
+           s.shared_deadline AS subcategory_shared_deadline,
+           (
+             SELECT active_tip.id FROM tips active_tip
+             WHERE active_tip.subcategory_id = t.subcategory_id
+               AND active_tip.status NOT IN (${SEQUENTIAL_TERMINAL_STATUS_SQL}) AND active_tip.archived_at IS NULL
+             ORDER BY COALESCE(active_tip.order_index, 2147483647), active_tip.id LIMIT 1
+           ) AS sequential_active_tip_id
     FROM tips t
     JOIN categories c ON t.category_id = c.id
+    LEFT JOIN subcategories s ON s.id = t.subcategory_id
     WHERE t.status = 'active'
       AND t.archived_at IS NULL
       AND (t.next_due_at IS NULL OR t.next_due_at <= ?)
@@ -1077,28 +2095,54 @@ function showRandomPopup() {
     params.push(focusMode.categoryId);
   }
 
-  query += ` ORDER BY RANDOM() LIMIT 1`;
-
   const tips = db.query(query, params);
+  const tip = selectWeightedPopupCandidate(tips, source);
 
-  if (tips.length > 0) {
-    const tip = { ...tips[0], score: calculateTipScore(tips[0]) };
-    updatePopupDebugState({
-      lastScoring: {
-        source: 'random-popup',
-        candidateCount: tips.length,
-        selected: summarizeTipForDebug(tip),
-        candidates: [summarizeTipForDebug(tip)],
-        scoredAt: new Date().toISOString()
-      }
-    });
+  if (tip) {
     const category = {
       name: tip.category_name,
       color: tip.category_color
     };
 
-    showPopupWithTip(tip, category);
+    const queued = showPopupWithTip(tip, category);
+    const lastSuppression = popupDebugState.lastSuppression;
+    updatePopupDebugState({
+      lastSchedulerAttempt: {
+        source,
+        result: queued ? 'queued' : 'suppressed',
+        candidate: summarizeTipForDebug(tip),
+        reason: queued || !lastSuppression ? null : lastSuppression.reason,
+        attemptedAt
+      },
+      lastSuppression: queued || !lastSuppression
+        ? popupDebugState.lastSuppression
+        : {
+            ...lastSuppression,
+            source: lastSuppression.source || source,
+            suppressedAt: lastSuppression.suppressedAt || attemptedAt
+          }
+    });
+    return { queued, tip };
   }
+
+  const schedulerSuppression = popupDebugState.lastSuppression;
+  const suppressionReason = schedulerSuppression?.reason === 'hourly-budget-exhausted'
+    ? schedulerSuppression
+    : {
+        reason: 'no-eligible-candidate',
+        source,
+        suppressedAt: attemptedAt
+      };
+  updatePopupDebugState({
+    lastSuppression: suppressionReason,
+    lastSchedulerAttempt: {
+      source,
+      result: 'no-eligible-tip',
+      reason: suppressionReason.reason,
+      attemptedAt
+    }
+  });
+  return { queued: false, tip: null };
 }
 
 app.whenReady().then(async () => {
@@ -1110,16 +2154,6 @@ app.whenReady().then(async () => {
   startWindowTitleTracking();
   startRandomPopupTracking();
 
-  // Fade in background music if configured
-  if (audioSettings && audioSettings.background_music && mainWindow) {
-    // Wait for settings window to be ready, then trigger fade in
-    setTimeout(() => {
-      if (mainWindow && mainWindow.webContents) {
-        mainWindow.webContents.send('audio-fade-in');
-      }
-    }, 1000);
-  }
-
   // Don't create main window initially, app lives in tray
 });
 
@@ -1129,11 +2163,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
-  // Fade out background music before quit
-  if (mainWindow && mainWindow.webContents) {
-    mainWindow.webContents.send('audio-fade-out');
-  }
-
   // Cleanup before quit
   if (titleCheckInterval) clearInterval(titleCheckInterval);
   if (randomPopupInterval) clearTimeout(randomPopupInterval);
@@ -1328,6 +2357,24 @@ ipcMain.handle('db-query', async (event, sql, params) => {
   }
 });
 
+ipcMain.handle('statistics-get', async (event, mode) => {
+  try {
+    return buildStatisticsSnapshot(mode);
+  } catch (error) {
+    console.error('Statistics query error:', error);
+    return buildStatisticsErrorResponse(mode, error);
+  }
+});
+
+ipcMain.handle('dashboard-weekly-progress', async () => {
+  try {
+    return buildDashboardWeeklyProgress();
+  } catch (error) {
+    console.error('Dashboard weekly progress error:', error);
+    return { ok: false, error: error.message };
+  }
+});
+
 ipcMain.handle('db-run', async (event, sql, params) => {
   console.log('DEBUG: main.js db-run handler called', { sql, params });
   try {
@@ -1335,9 +2382,21 @@ ipcMain.handle('db-run', async (event, sql, params) => {
     console.log('DEBUG: main.js db-run result', result);
     const recurringRescheduled = maybeApplyRecurringCompletion(sql, params);
     const completionTimestamped = markCompletionTimestampIfNeeded(sql, params, recurringRescheduled);
+    const sequentialProgression = applySequentialStatusProgression(sql, params, recurringRescheduled);
 
     // Check if it's a mutation and notify data updated
     const sqlUpper = sql.toUpperCase();
+    const notificationBudgetChanged = sqlUpper.includes('SETTINGS')
+      && Array.isArray(params)
+      && params.includes('notification_max_popups_per_hour');
+    if (notificationBudgetChanged && randomPopupSchedulerStartedAt) {
+      rescheduleRandomPopup();
+    }
+    const popupSelectionChanged = sqlUpper.includes('TIPS')
+      && (sqlUpper.includes('STATUS') || sqlUpper.includes('SUBCATEGORY_ID') || sqlUpper.includes('ORDER_INDEX'));
+    if (popupSelectionChanged && randomPopupSchedulerStartedAt) {
+      rescheduleRandomPopup();
+    }
     if (sqlUpper.includes('INSERT INTO CATEGORIES')) {
       ensureGeneralSubcategory(result.lastID);
     }
@@ -1349,8 +2408,8 @@ ipcMain.handle('db-run', async (event, sql, params) => {
       notifyDataUpdated('categories');
     }
     if (sqlUpper.includes('DELETE FROM TIPS') || sqlUpper.includes('UPDATE TIPS') || sqlUpper.includes('INSERT INTO TIPS')) {
-      notifyDataUpdated('tips', recurringRescheduled || completionTimestamped
-        ? { recurringRescheduled, completionTimestamped }
+      notifyDataUpdated('tips', recurringRescheduled || completionTimestamped || sequentialProgression
+        ? { recurringRescheduled, completionTimestamped, sequentialProgression }
         : {}
       );
     }
@@ -1469,8 +2528,7 @@ function getDailySnoozeLimit(importance) {
   if (importance <= 4) return 4;
   if (importance <= 6) return 3;
   if (importance <= 8) return 2;
-  if (importance === 9) return 1;
-  return 0; // importance 10
+  return 0; // importance 9-10 math route does not allow snooze
 }
 
 async function getTodaySnoozeCount(tipId) {
@@ -1487,47 +2545,92 @@ async function getTodaySnoozeCount(tipId) {
 
 ipcMain.handle('snooze-check', async (event, tipId) => {
   try {
-    const tip = db.get('SELECT importance FROM tips WHERE id = ?', [tipId]);
-    if (!tip) return { canSnooze: false, remaining: 0 };
+    const tip = db.get('SELECT * FROM tips WHERE id = ?', [tipId]);
+    if (!tip) return { canSnooze: false, remaining: 0, reason: 'tip-not-found', allowedReasons: [...ALLOWED_SNOOZE_REASONS] };
+    const deadlineInfo = getEffectiveDeadlineInfo(tip);
+    if (deadlineInfo.deadlineState === 'overdue') {
+      const validation = {
+        accepted: false,
+        tipId,
+        reason: 'deadline-expired',
+        effectiveDeadline: deadlineInfo.effectiveDeadline,
+        validatedAt: new Date().toISOString()
+      };
+      updatePopupDebugState({ lastSnoozeValidation: validation });
+      return { canSnooze: false, remaining: 0, reason: 'deadline-expired', allowedReasons: [...ALLOWED_SNOOZE_REASONS] };
+    }
 
     const limit = getDailySnoozeLimit(tip.importance);
-    if (limit === Infinity) return { canSnooze: true, remaining: Infinity };
-    if (limit === 0) return { canSnooze: false, remaining: 0 };
+    if (limit === Infinity) return { canSnooze: true, remaining: Infinity, allowedReasons: [...ALLOWED_SNOOZE_REASONS] };
+    if (limit === 0) return { canSnooze: false, remaining: 0, reason: 'importance-limit', allowedReasons: [...ALLOWED_SNOOZE_REASONS] };
 
     const count = await getTodaySnoozeCount(tipId);
     const remaining = Math.max(0, limit - count);
-    return { canSnooze: remaining > 0, remaining };
+    return { canSnooze: remaining > 0, remaining, reason: remaining > 0 ? null : 'daily-limit-exhausted', allowedReasons: [...ALLOWED_SNOOZE_REASONS] };
   } catch (error) {
     console.error('Error in snooze-check:', error);
-    return { canSnooze: false, remaining: 0 };
+    return { canSnooze: false, remaining: 0, reason: 'snooze-check-error', allowedReasons: [...ALLOWED_SNOOZE_REASONS] };
   }
 });
 
 ipcMain.handle('snooze-apply', async (event, tipId, reason) => {
+  let transactionStarted = false;
   try {
-    // reason: not_today, no_motivation, remind_1h, not_now
+    const normalizedReason = String(reason || '').trim().toLowerCase();
+    const tip = db.get('SELECT * FROM tips WHERE id = ?', [tipId]);
+    if (!tip) {
+      const validation = { accepted: false, tipId, reason: normalizedReason, validationReason: 'tip-not-found', validatedAt: new Date().toISOString() };
+      updatePopupDebugState({ lastSnoozeValidation: validation });
+      return { success: false, error: 'tip-not-found', allowedReasons: [...ALLOWED_SNOOZE_REASONS] };
+    }
+    const deadlineInfo = getEffectiveDeadlineInfo(tip);
+    if (deadlineInfo.deadlineState === 'overdue') {
+      const validation = { accepted: false, tipId, reason: normalizedReason, validationReason: 'deadline-expired', effectiveDeadline: deadlineInfo.effectiveDeadline, validatedAt: new Date().toISOString() };
+      updatePopupDebugState({ lastSnoozeValidation: validation });
+      return { success: false, error: 'deadline-expired', allowedReasons: [...ALLOWED_SNOOZE_REASONS] };
+    }
+    if (!ALLOWED_SNOOZE_REASONS.includes(normalizedReason)) {
+      const validation = { accepted: false, tipId, reason: normalizedReason, validationReason: 'invalid-snooze-reason', validatedAt: new Date().toISOString() };
+      updatePopupDebugState({ lastSnoozeValidation: validation });
+      return { success: false, error: 'invalid-snooze-reason', allowedReasons: [...ALLOWED_SNOOZE_REASONS] };
+    }
+    const snoozeLimit = getDailySnoozeLimit(tip.importance);
+    if (snoozeLimit === 0) {
+      const validation = { accepted: false, tipId, reason: normalizedReason, validationReason: 'snooze-disabled-for-event-route', validatedAt: new Date().toISOString() };
+      updatePopupDebugState({ lastSnoozeValidation: validation });
+      return { success: false, error: 'snooze-disabled-for-event-route', allowedReasons: [...ALLOWED_SNOOZE_REASONS] };
+    }
+    if (snoozeLimit !== Infinity) {
+      const usedSnoozes = await getTodaySnoozeCount(tipId);
+      if (usedSnoozes >= snoozeLimit) {
+        const validation = { accepted: false, tipId, reason: normalizedReason, validationReason: 'daily-limit-exhausted', validatedAt: new Date().toISOString() };
+        updatePopupDebugState({ lastSnoozeValidation: validation });
+        return { success: false, error: 'daily-limit-exhausted', allowedReasons: [...ALLOWED_SNOOZE_REASONS] };
+      }
+    }
+
     let durationHours = 0;
-    if (reason === 'not_today' || reason === 'no_motivation') durationHours = 24;
-    else if (reason === 'remind_1h') durationHours = 1;
-    else if (reason === 'not_now') durationHours = 2;
-    else if (reason === 'task_too_big' || reason === 'unclear') durationHours = 24;
+    if (normalizedReason === 'not_today' || normalizedReason === 'no_motivation') durationHours = 24;
+    else if (normalizedReason === 'remind_1h') durationHours = 1;
+    else if (normalizedReason === 'not_now') durationHours = 2;
 
     const snoozedUntil = new Date(Date.now() + durationHours * 3600000).toISOString();
 
     db.exec('BEGIN TRANSACTION');
+    transactionStarted = true;
 
     db.run('UPDATE tips SET snoozed_until = ? WHERE id = ?', [snoozedUntil, tipId]);
     db.run(
       `INSERT INTO dismiss_log (tip_id, reason, dismissed_at) VALUES (?, ?, ?)`,
-      [tipId, reason, Date.now()]
+      [tipId, normalizedReason, Date.now()]
     );
 
-    if (reason === 'no_motivation') {
+    if (normalizedReason === 'no_motivation') {
       db.run('UPDATE tips SET importance = MIN(importance + 1, 10) WHERE id = ?', [tipId]);
     }
 
-    const problemReasons = ['not_today', 'no_motivation', 'not_now', 'task_too_big', 'unclear'];
-    if (problemReasons.includes(reason)) {
+    const problemReasons = ['not_today', 'no_motivation', 'not_now'];
+    if (problemReasons.includes(normalizedReason)) {
       const problemCount = db.get(`
         SELECT COUNT(*) as count
         FROM dismiss_log
@@ -1539,11 +2642,23 @@ ipcMain.handle('snooze-apply', async (event, tipId, reason) => {
     }
 
     db.exec('COMMIT');
+    transactionStarted = false;
+    updatePopupDebugState({
+      lastSnoozeValidation: {
+        accepted: true,
+        tipId,
+        reason: normalizedReason,
+        snoozedUntil,
+        validatedAt: new Date().toISOString()
+      }
+    });
     notifyDataUpdated('tips');
     syncMarkdownStorageSafe('snooze-apply');
-    return { success: true };
+    return { success: true, reason: normalizedReason, snoozedUntil };
   } catch (error) {
-    db.exec('ROLLBACK');
+    if (transactionStarted) {
+      try { db.exec('ROLLBACK'); } catch {}
+    }
     console.error('Error in snooze-apply:', error);
     return { success: false, error: error.message };
   }
@@ -1556,9 +2671,32 @@ ipcMain.handle('get-popup-data', async () => {
 ipcMain.handle('show-popup', async (event, tipData = null) => {
   try {
     if (tipData) {
+      const tipId = tipData.tipId || tipData.id || null;
+      const storedTip = tipId ? db.get('SELECT * FROM tips WHERE id = ?', [tipId]) : null;
+      const sourceTip = storedTip ? { ...storedTip, ...tipData, id: storedTip.id } : tipData;
+      const deadlineInfo = getEffectiveDeadlineInfo(sourceTip);
+      if (deadlineInfo.deadlineState === 'overdue') {
+        updatePopupDebugState({
+          lastSuppression: {
+            reason: 'deadline-expired',
+            source: 'manual-show-popup',
+            tip: summarizeTipForDebug(sourceTip),
+            suppressedAt: new Date().toISOString()
+          }
+        });
+        return { success: false, error: 'deadline-expired' };
+      }
+      const route = getPopupEventRoute(sourceTip.importance, tipId);
+      const queuedData = {
+        ...tipData,
+        effectiveDeadline: deadlineInfo.effectiveDeadline,
+        deadlineSource: deadlineInfo.deadlineSource,
+        deadlineState: deadlineInfo.deadlineState,
+        ...route
+      };
       enqueuePopup({
         channel: 'show-tip',
-        data: tipData,
+        data: queuedData,
         key: `manual:${tipData.tipId || tipData.id || tipData.content || Date.now()}`
       });
     } else {
@@ -1643,63 +2781,16 @@ ipcMain.handle('log-dismiss-reason', async (event, tipId, reason) => {
 });
 
 ipcMain.handle('get-audio-settings', async () => {
-  try {
-    if (!audioSettings) loadAudioSettings();
-    return audioSettings || {};
-  } catch (error) {
-    console.error('Error in get-audio-settings:', error);
-    return {};
-  }
+  if (!audioSettings) loadAudioSettings();
+  return { ...AUDIO_DISABLED_SETTINGS };
 });
 
 // Audio control IPC handlers
-ipcMain.handle('audio-fade-in', async () => {
-  try {
-    if (mainWindow && mainWindow.webContents) {
-      mainWindow.webContents.send('audio-fade-in');
-    }
-    return { success: true };
-  } catch (error) {
-    console.error('Error in audio-fade-in:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('audio-fade-out', async () => {
-  try {
-    if (mainWindow && mainWindow.webContents) {
-      mainWindow.webContents.send('audio-fade-out');
-    }
-    return { success: true };
-  } catch (error) {
-    console.error('Error in audio-fade-out:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('audio-stop', async () => {
-  try {
-    if (mainWindow && mainWindow.webContents) {
-      mainWindow.webContents.send('audio-stop');
-    }
-    return { success: true };
-  } catch (error) {
-    console.error('Error in audio-stop:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('audio-set-volume', async (event, volume) => {
-  try {
-    if (mainWindow && mainWindow.webContents) {
-      mainWindow.webContents.send('audio-set-volume', volume);
-    }
-    return { success: true };
-  } catch (error) {
-    console.error('Error in audio-set-volume:', error);
-    return { success: false, error: error.message };
-  }
-});
+const suppressAudioIpc = async () => ({ success: false, audioDisabled: true, audioSuppressed: true });
+ipcMain.handle('audio-fade-in', suppressAudioIpc);
+ipcMain.handle('audio-fade-out', suppressAudioIpc);
+ipcMain.handle('audio-stop', suppressAudioIpc);
+ipcMain.handle('audio-set-volume', suppressAudioIpc);
 
 // Timer IPC handlers
 ipcMain.handle('show-timer', async (event, tipData) => {
@@ -1860,6 +2951,33 @@ ipcMain.handle('get-popup-queue', async () => popupQueue);
 
 ipcMain.handle('get-popup-debug-state', async () => getPopupDebugStateSnapshot());
 
+ipcMain.handle('debug-get-next-popups', async () => {
+  const snapshot = getPopupDebugStateSnapshot();
+  return {
+    candidates: snapshot.popupExitOrder,
+    items: snapshot.popupExitOrder,
+    schedulerState: snapshot.schedulerState,
+    triggerTime: snapshot.triggerTime,
+    trackedApplication: snapshot.trackedApplication,
+    usedPopupCount: snapshot.usedPopupCount,
+    hourlyLimit: snapshot.hourlyLimit,
+    nextAllowedAt: snapshot.nextAllowedAt,
+    waitingReason: snapshot.waitingReason,
+    hourlyBudget: snapshot.hourlyBudget,
+    selectionSettings: snapshot.selectionSettings,
+    context: snapshot.selectionSettings,
+    budgetLimit: snapshot.budgetLimit,
+    budgetUsed: snapshot.budgetUsed,
+    baseSlotMinutes: snapshot.baseSlotMinutes,
+    lastPopupAt: snapshot.lastPopupAt,
+    nextSlotAt: snapshot.nextSlotAt,
+    jitterMinutes: snapshot.jitterMinutes,
+    scheduleReason: snapshot.scheduleReason,
+    audioDisabled: snapshot.audioDisabled,
+    audioSuppressed: snapshot.audioSuppressed
+  };
+});
+
 ipcMain.handle('debug-start-popup-interval', async () => {
   try {
     if (debugPopupInterval) {
@@ -1879,7 +2997,7 @@ ipcMain.handle('debug-start-popup-interval', async () => {
             debugPopupCount
           }
         });
-        showRandomPopup();
+        showRandomPopup('debug-popup-interval');
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('debug-popup-count-update', { count: debugPopupCount, intervalMs });
         }
@@ -1971,6 +3089,8 @@ ipcMain.handle('debug-simulate-deadline', async (event, type, id, daysFromNow) =
       notifyDataUpdated('tips');
     }
 
+    if (randomPopupSchedulerStartedAt) rescheduleRandomPopup();
+
     syncMarkdownStorageSafe('debug-simulate-deadline');
     return { ok: true, success: true, type: normalizedType || 'tip', id, deadline };
   } catch (error) {
@@ -1985,7 +3105,7 @@ ipcMain.handle('debug-reset-snooze-limits', async () => {
     today.setHours(0, 0, 0, 0);
     db.run(
       `DELETE FROM dismiss_log
-       WHERE reason IN ('not_today','remind_1h','no_motivation','not_now','too_big','unclear')
+       WHERE reason IN ('not_today','remind_1h','no_motivation','not_now')
        AND dismissed_at >= ?`,
       [today.getTime()]
     );
@@ -2045,37 +3165,124 @@ ipcMain.handle('get-active-windows', async () => {
   });
 });
 
+ipcMain.handle('deadline-set', async (event, tipId, deadline) => {
+  try {
+    const normalizedDeadline = deadline ? new Date(deadline).toISOString() : null;
+    db.run('UPDATE tips SET deadline = ? WHERE id = ?', [normalizedDeadline, tipId]);
+    if (randomPopupSchedulerStartedAt) rescheduleRandomPopup();
+    notifyDataUpdated('tips');
+    syncMarkdownStorageSafe('deadline-set');
+    return { ok: true, success: true, tipId, deadline: normalizedDeadline };
+  } catch (error) {
+    return { ok: false, success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('deadline-clear', async (event, tipId) => {
+  try {
+    db.run('UPDATE tips SET deadline = NULL WHERE id = ?', [tipId]);
+    if (randomPopupSchedulerStartedAt) rescheduleRandomPopup();
+    notifyDataUpdated('tips');
+    syncMarkdownStorageSafe('deadline-clear');
+    return { ok: true, success: true, tipId, deadline: null };
+  } catch (error) {
+    return { ok: false, success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('deadline-get-effective', async (event, tipId) => {
+  try {
+    const row = db.get(`
+      SELECT t.id, t.subcategory_id, t.deadline,
+             s.is_sequential AS subcategory_is_sequential,
+             s.deadline_mode AS subcategory_deadline_mode,
+             s.shared_deadline AS subcategory_shared_deadline,
+             (
+               SELECT active_tip.id FROM tips active_tip
+               WHERE active_tip.subcategory_id = t.subcategory_id
+                 AND active_tip.status NOT IN (${SEQUENTIAL_TERMINAL_STATUS_SQL}) AND active_tip.archived_at IS NULL
+               ORDER BY COALESCE(active_tip.order_index, 2147483647), active_tip.id LIMIT 1
+             ) AS sequential_active_tip_id
+      FROM tips t
+      LEFT JOIN subcategories s ON s.id = t.subcategory_id
+      WHERE t.id = ?
+    `, [tipId]);
+    if (!row) return { ok: false, success: false, error: 'tip-not-found' };
+    const deadlineInfo = getEffectiveDeadlineInfo(row);
+    return {
+      ok: true,
+      success: true,
+      tipId,
+      deadline: deadlineInfo.effectiveDeadline,
+      effectiveDeadline: deadlineInfo.effectiveDeadline,
+      source: deadlineInfo.deadlineSource,
+      deadlineState: deadlineInfo.deadlineState,
+      popupEligible: deadlineInfo.deadlineState !== 'overdue',
+      suppressionReason: deadlineInfo.deadlineState === 'overdue' ? 'deadline-expired' : null,
+      isSequential: deadlineInfo.isSequential,
+      sequentialActiveTipId: deadlineInfo.sequentialActiveTipId,
+      isSequentialActiveStep: deadlineInfo.isSequentialActiveStep
+    };
+  } catch (error) {
+    return { ok: false, success: false, error: error.message };
+  }
+});
+
 // Subcategory handlers
 ipcMain.handle('subcategory-list', async (event, categoryId) => {
   try {
-    return db.query('SELECT * FROM subcategories WHERE category_id = ? ORDER BY order_index ASC', [categoryId]);
+    return db.query('SELECT * FROM subcategories WHERE category_id = ? ORDER BY order_index ASC', [categoryId])
+      .map(row => ({
+        ...row,
+        isSequential: Number(row.is_sequential || 0) === 1,
+        deadlineMode: row.deadline_mode || null,
+        sharedDeadline: row.shared_deadline || null
+      }));
   } catch (error) {
     console.error('Error fetching subcategories:', error);
     return [];
   }
 });
 
-ipcMain.handle('subcategory-create', async (event, categoryId, name, orderIndex) => {
+ipcMain.handle('subcategory-create', async (event, input, legacyName, legacyOrderIndex) => {
   try {
-    db.run('INSERT INTO subcategories (category_id, name, order_index) VALUES (?, ?, ?)', [categoryId, name, orderIndex]);
+    const params = input && typeof input === 'object'
+      ? input
+      : { categoryId: input, name: legacyName, orderIndex: legacyOrderIndex };
+    const nextOrder = Number.isFinite(Number(params.orderIndex))
+      ? Number(params.orderIndex)
+      : Number(db.get('SELECT COALESCE(MAX(order_index), -1) + 1 AS next_order FROM subcategories WHERE category_id = ?', [params.categoryId])?.next_order || 0);
+    const deadlineMode = params.deadlineMode === 'shared' ? 'shared' : null;
+    const sharedDeadline = deadlineMode && params.sharedDeadline ? new Date(params.sharedDeadline).toISOString() : null;
+    const result = db.run(`
+      INSERT INTO subcategories (category_id, name, order_index, is_sequential, deadline_mode, shared_deadline)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [params.categoryId, params.name, nextOrder, params.isSequential ? 1 : 0, deadlineMode, sharedDeadline]);
+    if (randomPopupSchedulerStartedAt) rescheduleRandomPopup();
     notifyDataUpdated('categories');
     syncMarkdownStorageSafe('subcategory-create');
-    return { success: true };
+    return { ok: true, success: true, id: result.lastID };
   } catch (error) {
-    console.error('Error creating subcategory:', error);
-    return { success: false, error: error.message };
+    return { ok: false, success: false, error: error.message };
   }
 });
 
-ipcMain.handle('subcategory-update', async (event, id, name) => {
+ipcMain.handle('subcategory-update', async (event, input, legacyName) => {
   try {
-    db.run('UPDATE subcategories SET name = ? WHERE id = ?', [name, id]);
+    const params = input && typeof input === 'object' ? input : { id: input, name: legacyName };
+    const deadlineMode = params.deadlineMode === 'shared' ? 'shared' : null;
+    const sharedDeadline = deadlineMode && params.sharedDeadline ? new Date(params.sharedDeadline).toISOString() : null;
+    db.run(`
+      UPDATE subcategories
+      SET name = ?, is_sequential = ?, deadline_mode = ?, shared_deadline = ?
+      WHERE id = ?
+    `, [params.name, params.isSequential ? 1 : 0, deadlineMode, sharedDeadline, params.id]);
+    if (randomPopupSchedulerStartedAt) rescheduleRandomPopup();
     notifyDataUpdated('categories');
     syncMarkdownStorageSafe('subcategory-update');
-    return { success: true };
+    return { ok: true, success: true };
   } catch (error) {
-    console.error('Error updating subcategory:', error);
-    return { success: false, error: error.message };
+    return { ok: false, success: false, error: error.message };
   }
 });
 
@@ -2083,6 +3290,7 @@ ipcMain.handle('subcategory-delete', async (event, id) => {
   try {
     db.run('DELETE FROM subcategories WHERE id = ?', [id]);
     db.run('UPDATE tips SET subcategory_id = NULL WHERE subcategory_id = ?', [id]);
+    if (randomPopupSchedulerStartedAt) rescheduleRandomPopup();
     ensureGeneralSubcategoriesForAll();
     notifyDataUpdated('categories');
     notifyDataUpdated('tips');
@@ -2091,5 +3299,36 @@ ipcMain.handle('subcategory-delete', async (event, id) => {
   } catch (error) {
     console.error('Error deleting subcategory:', error);
     return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('tip-assign-subcategory', async (event, input) => {
+  try {
+    const { tipId, subcategoryId, orderIndex = 0 } = input || {};
+    db.run('UPDATE tips SET subcategory_id = ?, order_index = ? WHERE id = ?', [subcategoryId || null, Number(orderIndex) || 0, tipId]);
+    if (randomPopupSchedulerStartedAt) rescheduleRandomPopup();
+    notifyDataUpdated('tips');
+    syncMarkdownStorageSafe('tip-assign-subcategory');
+    return { ok: true, success: true };
+  } catch (error) {
+    return { ok: false, success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('subcategory-reorder-tips', async (event, input) => {
+  const { subcategoryId, tipIds = [] } = input || {};
+  try {
+    db.exec('BEGIN');
+    tipIds.forEach((tipId, orderIndex) => {
+      db.run('UPDATE tips SET subcategory_id = ?, order_index = ? WHERE id = ?', [subcategoryId, orderIndex, tipId]);
+    });
+    db.exec('COMMIT');
+    if (randomPopupSchedulerStartedAt) rescheduleRandomPopup();
+    notifyDataUpdated('tips');
+    syncMarkdownStorageSafe('subcategory-reorder-tips');
+    return { ok: true, success: true, count: tipIds.length };
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch {}
+    return { ok: false, success: false, error: error.message };
   }
 });

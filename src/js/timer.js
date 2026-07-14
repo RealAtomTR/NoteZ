@@ -61,10 +61,6 @@ if (doneBtn) {
         console.error('[timer] Error marking tip as done:', e);
       }
     }
-    // Notify main process → triggers confetti + win SFX
-    if (window.electronAPI && window.electronAPI.timerEnded) {
-      window.electronAPI.timerEnded();
-    }
     if (window.electronAPI && window.electronAPI.closeTimer) {
       window.electronAPI.closeTimer();
     }
@@ -94,9 +90,6 @@ if (followupYesBtn) {
       } catch (e) {
         console.error('[timer] Error marking tip as done from follow-up:', e);
       }
-    }
-    if (window.electronAPI && window.electronAPI.timerEnded) {
-      window.electronAPI.timerEnded();
     }
     if (window.electronAPI && window.electronAPI.closeTimer) {
       window.electronAPI.closeTimer();

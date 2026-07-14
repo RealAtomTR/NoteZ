@@ -141,8 +141,9 @@ function _stopCurrentTest() {
 let categories = [];
 let tips = [];
 const descriptionSaveTimers = new Map();
+let openDetailTipId = null;
 const notificationBudgetDefaults = {
-  notification_max_popups_per_hour: '3',
+  notification_max_popups_per_hour: '5',
   notification_minimum_popup_interval_minutes: '15',
   notification_same_task_cooldown_minutes: '45',
   notification_quiet_hours_enabled: '0',
@@ -169,8 +170,10 @@ function closeNoteMenus(exceptDropdown = null) {
   document.querySelectorAll('.note-menu-dropdown.show').forEach(dropdown => {
     if (dropdown === exceptDropdown) return;
     dropdown.classList.remove('show');
-    dropdown.closest('.tip-item')?.classList.remove('menu-open', 'menu-click-open');
-    dropdown.closest('.accordion-item')?.classList.remove('menu-open');
+    const tipItem = dropdown.closest('.tip-item');
+    tipItem?.classList.remove('menu-open', 'menu-click-open');
+    tipItem?.querySelector('.note-menu-toggle-btn')?.setAttribute('aria-expanded', 'false');
+    if (openDetailTipId === Number(dropdown.dataset.tipId)) openDetailTipId = null;
   });
 }
 
@@ -183,7 +186,12 @@ function setNoteMenuOpen(dropdown, shouldOpen) {
   dropdown.classList.toggle('show', shouldOpen);
   tipItem?.classList.toggle('menu-open', shouldOpen);
   tipItem?.classList.toggle('menu-click-open', shouldOpen);
-  dropdown.closest('.accordion-item')?.classList.toggle('menu-open', shouldOpen);
+  tipItem?.querySelector('.note-menu-toggle-btn')?.setAttribute('aria-expanded', String(shouldOpen));
+  if (shouldOpen) {
+    openDetailTipId = Number(dropdown.dataset.tipId);
+  } else if (openDetailTipId === Number(dropdown.dataset.tipId)) {
+    openDetailTipId = null;
+  }
 }
 
 // Initialize
@@ -359,6 +367,8 @@ async function loadAudioSettings() {
     }
 
     loadNotificationBudgetControls(settingsMap);
+    // Stored audio preferences are intentionally inactive in this silent UI release.
+    return;
     
     const sfxKeys = [
       { id: 'sound-level-1-3', dbKey: 'sound_level_1_3' },
@@ -644,6 +654,8 @@ function setupEventListeners() {
         let nextIdx = (curIdx + 1) % states.length;
         const nextStatus = states[nextIdx];
         await updateTipStatusInline(tipId, nextStatus);
+        const detailPanel = icon.closest('.note-menu-dropdown');
+        if (detailPanel) setNoteMenuOpen(detailPanel, true);
       }
     }
 
@@ -690,8 +702,19 @@ function setupEventListeners() {
       deleteNote(tipId, btn);
     }
 
-    // Tip Row Dropdown Toggle Click
-    if (e.target.closest('.tip-item') && !e.target.closest('.note-menu-wrapper') && !e.target.closest('.note-menu-dropdown') && !e.target.closest('.status-ring') && !e.target.closest('.importance-box') && !e.target.closest('.calendar-btn') && !e.target.closest('.clear-deadline-x') && !e.target.closest('.delete-note-btn')) {
+    // A title click is reserved for editing; it never toggles the detail panel.
+    const noteTitle = e.target.closest('.note-content-text');
+    if (noteTitle) {
+      if (noteTitle.getAttribute('contenteditable') !== 'true') {
+        e.preventDefault();
+        enterNoteTextEditMode(noteTitle);
+      }
+      e.stopPropagation();
+      return;
+    }
+
+    // Only the upper note body is an inline detail toggle area.
+    if (e.target.closest('.note-panel-toggle-area') && !e.target.closest('.note-menu-dropdown')) {
       e.preventDefault();
       e.stopPropagation();
       const tipItem = e.target.closest('.tip-item');
@@ -728,8 +751,6 @@ function setupEventListeners() {
           dateInput.focus();
         }
       }
-      const dropdown = item.closest('.note-menu-dropdown');
-      if (dropdown) setNoteMenuOpen(dropdown, false);
     }
 
     // Clear Deadline Click
@@ -738,7 +759,7 @@ function setupEventListeners() {
       e.stopPropagation();
       const item = e.target.closest('.clear-deadline-item');
       const tipId = parseInt(item.getAttribute('data-tip-id'));
-      await updateTipProperty(tipId, 'deadline', null);
+      await updateTipProperty(tipId, 'deadline', null, { keepDetailOpen: true });
     }
 
     // Duration Button Click
@@ -749,11 +770,7 @@ function setupEventListeners() {
       const tipId = parseInt(btn.getAttribute('data-tip-id'));
       const val = parseInt(btn.getAttribute('data-duration'));
       console.log(`[settings] dropdown duration changed for tip ${tipId} to ${val}dk`);
-      await updateTipProperty(tipId, 'focus_duration', val);
-      const dropdown = btn.closest('.note-menu-dropdown');
-      if (dropdown) {
-        setNoteMenuOpen(dropdown, false);
-      }
+      await updateTipProperty(tipId, 'focus_duration', val, { keepDetailOpen: true });
     }
 
     // Delete Note Item Click (Dropdown action)
@@ -775,14 +792,6 @@ function setupEventListeners() {
     }
   });
 
-  // Inline Note Text Editing: Double click to enter contenteditable mode
-  contentWrapper.addEventListener('dblclick', (e) => {
-    if (e.target.closest('.note-content-text')) {
-      e.preventDefault();
-      const span = e.target.closest('.note-content-text');
-      enterNoteTextEditMode(span);
-    }
-  });
 
   // Task detail description is edited only from its inline accordion panel.
   contentWrapper.addEventListener('input', (e) => {
@@ -972,7 +981,7 @@ function setupEventListeners() {
       const dateInput = e.target.closest('.inline-deadline-input');
       const tipId = parseInt(dateInput.closest('.tip-item').getAttribute('data-tip-id'));
       const val = dateInput.value ? dateInput.value : null;
-      updateTipProperty(tipId, 'deadline', val);
+      updateTipProperty(tipId, 'deadline', val, { keepDetailOpen: true });
     }
   });
   
@@ -1054,14 +1063,9 @@ function setupEventListeners() {
       devTriggerCheckinPopup();
     }
 
-    if (e.target.closest('#dev-refresh-popups')) {
+    if (e.target.closest('#dev-refresh-popup-output')) {
       e.preventDefault();
-      loadNextPopupTimes();
-    }
-
-    if (e.target.closest('#dev-refresh-queue')) {
-      e.preventDefault();
-      loadPopupQueueStatus();
+      loadPopupExitOrder();
     }
 
     if (e.target.closest('#dev-sim-apply')) {
@@ -1223,8 +1227,7 @@ function showSection(sectionId) {
     loadDashboard();
   } else if (sectionId === 'dev-tools' || sectionId === 'devtools' || sectionId === 'settings') {
     populateDevToolsDropdowns();
-    loadNextPopupTimes();
-    loadPopupQueueStatus();
+    loadPopupExitOrder();
   }
 }
 
@@ -1593,7 +1596,7 @@ async function saveNotificationBudgetSettings() {
 
     const quietEnabled = document.getElementById('notification-quiet-hours-enabled');
     const settings = [
-      { key: 'notification_max_popups_per_hour', value: clampNumberInput('notification-max-popups-per-hour', 1, 20, 3) },
+      { key: 'notification_max_popups_per_hour', value: clampNumberInput('notification-max-popups-per-hour', 1, 20, 5) },
       { key: 'notification_minimum_popup_interval_minutes', value: clampNumberInput('notification-minimum-popup-interval', 1, 240, 15) },
       { key: 'notification_same_task_cooldown_minutes', value: clampNumberInput('notification-same-task-cooldown', 1, 480, 45) },
       { key: 'notification_quiet_hours_enabled', value: quietEnabled && quietEnabled.checked ? '1' : '0' },
@@ -1826,7 +1829,7 @@ async function loadStatistics() {
       SELECT COUNT(*) as count
       FROM tips
       WHERE last_completed_at IS NOT NULL AND last_completed_at >= ?
-    `, [startDate.toISOString()]);
+    `, [startDate.getTime()]);
     const periodCompletedCount = periodCompletedResult && periodCompletedResult[0] ? periodCompletedResult[0].count : 0;
     const completedCountEl = document.getElementById('stats-completed-count');
     if (completedCountEl) completedCountEl.textContent = `${periodCompletedCount}/${completedCount}`;
@@ -1878,7 +1881,7 @@ async function loadStatistics() {
     const dismissals = await window.electronAPI.dbQuery(`
       SELECT dismissed_at FROM dismiss_log 
       WHERE dismissed_at >= ?
-    `, [startDate.toISOString()]);
+    `, [startDate.getTime()]);
 
     const dailyCounts = Array(daysCount).fill(0);
     (dismissals || []).forEach(row => {
@@ -1898,7 +1901,7 @@ async function loadStatistics() {
       const weekdays = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz'];
       
       dailyCounts.forEach((count, i) => {
-        const pct = Math.min((count / maxDismiss) * 100, 100);
+        const pct = count > 0 ? Math.max(8, Math.min((count / maxDismiss) * 100, 100)) : 0;
         
         const col = document.createElement('div');
         col.className = 'stats-trend-bar-col';
@@ -1941,7 +1944,7 @@ async function loadStatistics() {
       WHERE reason IS NOT NULL AND reason != '' AND dismissed_at >= ?
       GROUP BY reason 
       ORDER BY count DESC
-    `, [startDate.toISOString()]);
+    `, [startDate.getTime()]);
 
     const reasonsMapping = {
       'not_today': 'Bugün değil',
@@ -2344,13 +2347,13 @@ async function isCategoryCompleted(categoryId) {
     if (subcatTips.length === 0) {
       continue;
     }
-    const allDone = subcatTips.every(t => t.status === 'done');
+    const allDone = subcatTips.every(t => ['done', 'cancelled'].includes(t.status));
     if (!allDone) return false;
   }
   
   if (hasGenelTips) {
     const genelTips = categoryTips.filter(t => t.subcategory_id === null || !subcats.some(s => s.id === t.subcategory_id));
-    const allDone = genelTips.every(t => t.status === 'done');
+    const allDone = genelTips.every(t => ['done', 'cancelled'].includes(t.status));
     if (!allDone) return false;
   }
   
@@ -2645,7 +2648,7 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
       // Active step detection for sequential subcategory
       let activeTipIndex = -1;
       if (sub.isSequential) {
-        activeTipIndex = subcatTipsList.findIndex(t => t.status !== 'done');
+        activeTipIndex = subcatTipsList.findIndex(t => !['done', 'cancelled'].includes(t.status));
       }
       
       const tipsHtml = subcatTipsList.map((tip, index) => {
@@ -2667,7 +2670,7 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
           cardClasses.push('cancelled-step');
         }
         
-        const isDraggable = sub.isSequential;
+        const isDraggable = sub.isSequential; // Flat subcategories never receive blocked-step state.
         
         let isBlocked = false;
         let blockedBadgeHtml = '';
@@ -2688,7 +2691,7 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
           ? `<div class="step-number" data-tip-id="${tip.id}" data-subcat-id="${sub.id || ''}">${getStatusRingHtml(tip.status)}<span class="step-index">${index + 1}</span></div>`
           : `<div class="step-bullet">${getStatusRingHtml(tip.status)}</div>`;
           
-        const effectiveImportance = computeEffectiveImportance(tip);
+        const effectiveImportance = computeEffectiveImportance({ ...tip, deadline: sub.deadlineMode === 'shared' && sub.sharedDeadline ? sub.sharedDeadline : tip.deadline });
         let impClass = '';
         if (effectiveImportance <= 3) impClass = 'imp-1-3';
         else if (effectiveImportance <= 6) impClass = 'imp-4-6';
@@ -2700,16 +2703,17 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
 
         
         const showCalendarIcon = sub.deadlineMode !== 'shared';
-        const isExpired = tip.deadline && getRelativeDeadlineText(tip.deadline) === 'Geçti!';
+        const effectiveDeadline = sub.deadlineMode === 'shared' && sub.sharedDeadline ? sub.sharedDeadline : tip.deadline;
+        const isExpired = effectiveDeadline && getRelativeDeadlineText(effectiveDeadline) === 'Geçti!';
         const expiredClass = isExpired ? 'expired-note' : '';
         const expiredBadgeHtml = isExpired ? `<span class="expired-label-badge" style="color: #ef4444; font-size: 11px; font-weight: bold; margin-left: 8px;">● Geçti!</span>` : '';
         let relativeText = '';
         let deadlineBadgeHtml = '';
-        if (tip.deadline) {
-          relativeText = getRelativeDeadlineText(tip.deadline);
+        if (effectiveDeadline) {
+          relativeText = getRelativeDeadlineText(effectiveDeadline);
           let badgeColorClass = 'deadline-2weeks';
           const now = new Date();
-          const dl = new Date(tip.deadline);
+          const dl = new Date(effectiveDeadline);
           const diffTime = dl - now;
           const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
           if (diffTime < 0) {
@@ -2728,7 +2732,7 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
         return `
           <div class="${cardClasses.join(' ')}" data-tip-id="${tip.id}" data-subcat-id="${sub.id || ''}" ${isDraggable && !isBlocked ? 'draggable="true"' : ''}>
             ${stepNumHtml}
-            <div class="step-content">
+            <div class="step-content note-panel-toggle-area" data-panel-toggle>
               <h4 class="note-content-text ${expiredClass}" data-tip-id="${tip.id}" placeholder="Not içeriği girin...">${tip.content}</h4>
               ${expiredBadgeHtml}
               ${deadlineBadgeHtml}
@@ -2739,10 +2743,10 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
               ${importanceBoxHtml}
               
               <div class="note-menu-wrapper">
-                <button class="note-menu-toggle-btn" data-tip-id="${tip.id}" title="İşlemler">›</button>
+                <button class="note-menu-toggle-btn" data-tip-id="${tip.id}" title="Detayı aç/kapat" aria-expanded="false" aria-controls="note-detail-${tip.id}">›</button>
               </div>
             </div>
-            <section class="note-menu-dropdown task-detail-panel" data-tip-id="${tip.id}" aria-label="Not detayları">
+            <section id="note-detail-${tip.id}" class="note-menu-dropdown task-detail-panel" data-tip-id="${tip.id}" aria-label="Not detayları">
               <div class="task-detail-description">
                 <label class="note-menu-description-label" for="note-description-${tip.id}">Açıklama</label>
                 <textarea id="note-description-${tip.id}" class="note-description-input" data-tip-id="${tip.id}" placeholder="Bir Açıklama Yazın" aria-label="Açıklama">${escapeHtml(tip.description ?? '')}</textarea>
@@ -2778,7 +2782,7 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
         : tipsHtml;
         
       // Determine if subcategory is completed (all notes in it are done)
-      const isSubcatCompleted = subcatTipsList.length > 0 && subcatTipsList.every(t => t.status === 'done');
+      const isSubcatCompleted = subcatTipsList.length > 0 && subcatTipsList.every(t => ['done', 'cancelled'].includes(t.status));
       const subcatCompletedClass = isSubcatCompleted ? 'completed' : '';
       const checkmarkHtml = isSubcatCompleted ? '<span class="subcat-completed-check" style="color: #22c55e; margin-right: 4px; font-weight: bold;">✓</span>' : '';
 
@@ -2825,6 +2829,15 @@ async function loadCategoryTabContent(categoryId, subcatIdToExpand = undefined) 
       <p>Gösterilen Not: ${categoryTips.length} / ${allCategoryTips.length}</p>
       <p>Gösterilen Gösterim: ${visibleShows} / ${totalShows}</p>
     `;
+  }
+
+  if (openDetailTipId !== null) {
+    const openDropdown = categoryTipsContainer?.querySelector(`.note-menu-dropdown[data-tip-id="${openDetailTipId}"]`);
+    if (openDropdown) {
+      setNoteMenuOpen(openDropdown, true);
+    } else {
+      openDetailTipId = null;
+    }
   }
 }
 
@@ -3256,191 +3269,244 @@ async function devTriggerCheckinPopup() {
   }
 }
 
-async function loadPopupQueueStatus() {
-  const container = document.getElementById('dev-queue-container');
-  if (!container) return;
+let popupOutputLastSignature = '';
+let popupOutputRefreshTimer = null;
+let popupOutputRequestInFlight = false;
+let popupOutputRefreshQueued = false;
 
-  try {
-    if (!window.electronAPI || !window.electronAPI.getPopupQueue) {
-      container.innerHTML = '<p style="color:#ef4444;">IPC mevcut değil.</p>';
-      return;
-    }
-    const queue = await window.electronAPI.getPopupQueue();
-    if (!queue || queue.length === 0) {
-      container.innerHTML = '<p style="color: var(--text-muted);">Kuyruk boş veya henüz oluşturulmadı.</p>';
-      return;
-    }
-    container.innerHTML = queue.map((item, i) => {
-      const impColor = item.targetImportance >= 8 ? '#ef4444' : item.targetImportance >= 5 ? '#f5a623' : '#22c55e';
-      const when = item.minutesFromNow < 0
-        ? `<span style="color:#ef4444">${Math.abs(item.minutesFromNow)} dk geçti</span>`
-        : `<span style="color:#22c55e">+${item.minutesFromNow} dk</span>`;
-      return `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--border);">
-        <span style="color:var(--text-muted)">#${i+1}</span>
-        <span>${when}</span>
-        <span>Hedef Önem: <strong style="color:${impColor}">${item.targetImportance}</strong></span>
-      </div>`;
-    }).join('');
-  } catch (e) {
-    container.innerHTML = `<p style="color:#ef4444;">Hata: ${e.message}</p>`;
-  }
+function schedulePopupExitOrderRefresh(delay = 180) {
+  clearTimeout(popupOutputRefreshTimer);
+  popupOutputRefreshTimer = setTimeout(() => {
+    popupOutputRefreshTimer = null;
+    void loadPopupExitOrder();
+  }, delay);
 }
 
-async function loadNextPopupTimes() {
-  const container = document.getElementById('dev-next-popups-container');
-  if (!container) return;
-  
-  try {
-    if (window.electronAPI && window.electronAPI.debugGetNextPopups) {
-      const data = await window.electronAPI.debugGetNextPopups();
-      renderNextPopupsTable(data);
-      return;
-    }
-    
-    if (!window.electronAPI || !window.electronAPI.dbQuery) {
-      container.innerHTML = '<p style="color: var(--text-muted);">Veri okuma hatası.</p>';
-      return;
-    }
-    
-    const settingsRows = await window.electronAPI.dbQuery(`SELECT key, value FROM settings`);
-    const settingsMap = {};
-    settingsRows.forEach(r => { settingsMap[r.key] = r.value; });
-    const intensity = parseFloat(settingsMap['popup_intensity']) || 1.0;
-    
-    const activeNotes = await window.electronAPI.dbQuery(`
-      SELECT t.id, t.content, t.importance, t.last_shown, t.snoozed_until, 
-             c.name as category_name, c.triggers, sc.is_sequential, t.order_index, t.subcategory_id
-      FROM tips t
-      JOIN categories c ON t.category_id = c.id
-      LEFT JOIN subcategories sc ON sc.id = t.subcategory_id
-      WHERE t.status = 'active'
-        AND t.archived_at IS NULL
-        AND (t.next_due_at IS NULL OR t.next_due_at <= ?)
-    `, [new Date().toISOString()]);
-    
-    let activeWinProcess = '';
-    if (window.electronAPI && window.electronAPI.debugGetActiveWindow) {
-      const winInfo = await window.electronAPI.debugGetActiveWindow();
-      if (winInfo && winInfo.process) {
-        activeWinProcess = winInfo.process.toLowerCase();
-      }
-    }
-    
-    const now = new Date();
-    const data = activeNotes.map(note => {
-      let intervalMin = 90 - (note.importance - 1) * 8.33;
-      intervalMin = intervalMin * intensity;
-      
-      let appMatch = false;
-      if (note.triggers) {
-        try {
-          const triggers = JSON.parse(note.triggers);
-          if (triggers.apps && Array.isArray(triggers.apps)) {
-            const match = triggers.apps.find(app => activeWinProcess.includes(app.toLowerCase()));
-            if (match) {
-              intervalMin = intervalMin / 2;
-              appMatch = true;
-            }
-          }
-        } catch(e) {}
-      }
-      
-      const lastShownTime = note.last_shown ? new Date(note.last_shown) : now;
-      let nextPopupTime = new Date(lastShownTime.getTime() + intervalMin * 60 * 1000);
-      
-      if (note.snoozed_until) {
-        const snoozeTime = new Date(note.snoozed_until);
-        if (snoozeTime > nextPopupTime) {
-          nextPopupTime = snoozeTime;
-        }
-      }
-      
-      return {
-        id: note.id,
-        content: note.content,
-        importance: note.importance,
-        category: note.category_name,
-        nextTime: nextPopupTime,
-        isSnoozed: note.snoozed_until && new Date(note.snoozed_until) > now,
-        appMatch: appMatch
-      };
-    });
-    
-    data.sort((a, b) => a.nextTime - b.nextTime);
-    renderNextPopupsTable(data);
-  } catch (error) {
-    console.error('Error loading next popup times:', error);
-    container.innerHTML = '<p style="color: var(--text-muted);">Süreler hesaplanırken hata oluştu.</p>';
-  }
-}
+async function loadPopupExitOrder() {
+  const body = document.getElementById('dev-popup-output-body');
+  if (!body) return;
 
-function renderNextPopupsTable(data) {
-  const container = document.getElementById('dev-next-popups-container');
-  if (!container) return;
-  
-  if (!data || data.length === 0) {
-    container.innerHTML = '<p style="color: var(--text-muted); font-size: 13px;">Aktif not bulunamadı.</p>';
+  if (popupOutputRequestInFlight) {
+    popupOutputRefreshQueued = true;
     return;
   }
-  
-  let html = `
-    <table class="dev-popups-table" style="width:100%; border-collapse: collapse; font-size: 12px; margin-top: var(--spacing-sm);">
-      <thead>
-        <tr style="border-bottom: 2px solid var(--border); text-align: left; color: var(--text-secondary);">
-          <th style="padding: 6px;">Kategori / Not</th>
-          <th style="padding: 6px; text-align: center;">Önem</th>
-          <th style="padding: 6px;">Sonraki Tetiklenme</th>
-          <th style="padding: 6px; text-align: right;">Durum</th>
-        </tr>
-      </thead>
-      <tbody>
-  `;
-  
-  const now = new Date();
-  data.forEach(item => {
-    const diffMs = item.nextTime - now;
-    let timeStr = '';
-    if (diffMs <= 0) {
-      timeStr = 'Hemen';
-    } else {
-      const diffMin = Math.round(diffMs / 60000);
-      if (diffMin >= 60) {
-        timeStr = `${Math.floor(diffMin / 60)}sa ${diffMin % 60}dk`;
-      } else {
-        timeStr = `${diffMin}dk`;
-      }
+
+  popupOutputRequestInFlight = true;
+  try {
+    const scheduleRequest = window.electronAPI?.debugGetNextPopups
+      ? window.electronAPI.debugGetNextPopups()
+      : Promise.resolve(null);
+    const queueRequest = window.electronAPI?.getPopupQueue
+      ? window.electronAPI.getPopupQueue()
+      : Promise.resolve(null);
+
+    const [scheduleResult, queueResult] = await Promise.allSettled([scheduleRequest, queueRequest]);
+    const schedulePayload = scheduleResult.status === 'fulfilled' ? scheduleResult.value : null;
+    const queuePayload = queueResult.status === 'fulfilled' ? queueResult.value : null;
+    const snapshotScopes = getPopupSnapshotScopes(schedulePayload, queuePayload);
+    const schedules = Array.isArray(schedulePayload)
+      ? schedulePayload
+      : (schedulePayload?.popupExitOrder || schedulePayload?.data?.popupExitOrder || schedulePayload?.candidates || schedulePayload?.items || []);
+    const queue = Array.isArray(queuePayload)
+      ? queuePayload
+      : (queuePayload?.candidates || queuePayload?.items || []);
+    const summary = getPopupOutputSummary(snapshotScopes);
+
+    if (!schedules.length && !queue.length) {
+      const unavailable = !window.electronAPI?.debugGetNextPopups && !window.electronAPI?.getPopupQueue;
+      const fetchError = scheduleResult.status === 'rejected'
+        ? `Debug snapshot okunamadı: ${scheduleResult.reason?.message || 'IPC hatası'}.`
+        : (queueResult.status === 'rejected' ? `Queue gözlem verisi okunamadı: ${queueResult.reason?.message || 'IPC hatası'}.` : '');
+      const waitingReason = readPopupDebugValue(snapshotScopes, ['waitingReason', 'schedulerStatus', 'statusReason']);
+      const message = unavailable
+        ? 'Veri akışı kullanılamıyor: debug state IPC erişilebilir değil.'
+        : (fetchError || (waitingReason
+          ? `Scheduler bekliyor: ${waitingReason}. Ayar ve uygunluk bilgisi üstte gösterilir.`
+          : 'Aday verisi henüz yayınlanmadı. Debug state veya hesaplama sonucu geldiğinde burada görünür.'));
+      renderPopupOutputView(summary, [], message);
+      return;
     }
-    
-    let statusBadge = '';
-    if (item.isSnoozed) {
-      statusBadge = '<span style="background: rgba(245, 166, 35, 0.1); color: #f5a623; padding: 2px 6px; border-radius: 4px; font-size: 10px;">Ertelendi</span>';
-    } else if (item.appMatch) {
-      statusBadge = '<span style="background: rgba(108, 71, 255, 0.1); color: #6c47ff; padding: 2px 6px; border-radius: 4px; font-size: 10px;">Eşleşen Uygulama</span>';
-    } else {
-      statusBadge = '<span style="background: rgba(34, 197, 94, 0.1); color: #22c55e; padding: 2px 6px; border-radius: 4px; font-size: 10px;">Bekliyor</span>';
+
+    const scheduleById = new Map(schedules.map(item => [String(item.tipId ?? item.tip_id ?? item.id ?? item.tip?.id), item]));
+    const sourceRows = schedules.length ? schedules : queue;
+    const rows = sourceRows.map((source, index) => {
+      const tipId = source.tipId ?? source.tip_id ?? source.id ?? source.tip?.id;
+      const scheduled = scheduleById.get(String(tipId)) || {};
+      const candidateScopes = [
+        source,
+        scheduled,
+        source.factors,
+        scheduled.factors,
+        source.selectionFactors,
+        scheduled.selectionFactors,
+        source.debug,
+        scheduled.debug
+      ].filter(Boolean);
+      const rawEligibility = readPopupDebugValue(candidateScopes, ['eligible', 'isEligible', 'eligibility']);
+      const eligibility = rawEligibility === undefined || rawEligibility === null
+        ? 'Bilinmiyor'
+        : (typeof rawEligibility === 'boolean' ? (rawEligibility ? 'Uygun' : 'Uygun değil') : String(rawEligibility));
+      const suppression = readPopupDebugValue(candidateScopes, ['suppressionReason', 'suppression_reason', 'waitingReason', 'ineligibilityReason']) || 'Yok';
+
+      return {
+        order: readPopupDebugValue(candidateScopes, ['rank', 'order']) ?? index + 1,
+        id: tipId ?? scheduled.tipId ?? scheduled.id ?? '-',
+        title: readPopupDebugValue(candidateScopes, ['tipTitle', 'content', 'title']) ?? source.tip?.content ?? source.tip?.title ?? scheduled.tip?.content ?? scheduled.tip?.title ?? 'Başlık debug state içinde yok',
+        plannedAt: readPopupDebugValue(candidateScopes, ['plannedTriggerAt', 'nextTime', 'triggerTime']),
+        minutesFromNow: readPopupDebugValue(candidateScopes, ['minutesFromNow']),
+        score: readPopupDebugValue(candidateScopes, ['queueScore', 'queue_score', 'rawScore', 'score']),
+        importance: readPopupDebugValue(candidateScopes, ['importanceContribution', 'importanceScore', 'importance']),
+        contextMatch: readPopupDebugValue(candidateScopes, ['contextContribution', 'contextScore', 'contextMatch', 'contextMatched', 'appMatch']),
+        staleness: readPopupDebugValue(candidateScopes, ['stalenessBoost', 'stalenessContribution', 'staleness', 'freshnessBoost', 'freshness']),
+        deadline: readPopupDebugValue(candidateScopes, ['deadlineContribution', 'deadlineBoost', 'deadlineScore', 'deadlineWeight']),
+        cooldown: readPopupDebugValue(candidateScopes, ['cooldownRemaining', 'cooldownContribution', 'cooldownMinutes', 'cooldown', 'isCoolingDown']),
+        probability: readPopupDebugValue(candidateScopes, ['finalProbability', 'probability', 'selectionProbability']),
+        probabilityReason: readPopupDebugValue(candidateScopes, ['probabilityReason', 'finalProbabilityReason', 'selectionReason']),
+        finalWeight: readPopupDebugValue(candidateScopes, ['finalWeight', 'weight']),
+        eligibility,
+        suppression
+      };
+    });
+
+    renderPopupOutputView(summary, rows);
+  } finally {
+    popupOutputRequestInFlight = false;
+    if (popupOutputRefreshQueued) {
+      popupOutputRefreshQueued = false;
+      schedulePopupExitOrderRefresh();
     }
-    
-    const truncatedContent = item.content.length > 35 ? item.content.substring(0, 35) + '...' : item.content;
-    
-    html += `
-      <tr style="border-bottom: 1px solid var(--border); color: var(--text-primary);">
-        <td style="padding: 6px;" title="${item.content}">
-          <strong style="color: var(--text-muted);">${item.category}:</strong> ${truncatedContent}
-        </td>
-        <td style="padding: 6px; text-align: center; font-weight:600;">${item.importance}</td>
-        <td style="padding: 6px;">${timeStr} (${item.nextTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})})</td>
-        <td style="padding: 6px; text-align: right;">${statusBadge}</td>
-      </tr>
-    `;
-  });
-  
-  html += `
-      </tbody>
-    </table>
-  `;
-  container.innerHTML = html;
+  }
 }
 
+function renderPopupOutputView(summary, rows, emptyMessage = '') {
+  const body = document.getElementById('dev-popup-output-body');
+  if (!body) return;
+
+  setPopupOutputText('dev-popup-output-used', formatPopupDebugValue(summary.used));
+  setPopupOutputText('dev-popup-output-limit', formatPopupDebugValue(summary.limit));
+  setPopupOutputText('dev-popup-output-slot-interval', formatPopupSlotInterval(summary.slotIntervalMinutes));
+  setPopupOutputText('dev-popup-output-last-popup', formatPopupOutputTime(summary.lastPopupAt, null));
+  setPopupOutputText('dev-popup-output-next-slot', formatPopupOutputTime(summary.nextSlotAt, null));
+  setPopupOutputText('dev-popup-output-next-allowed', formatPopupOutputTime(summary.nextAllowedAt, null));
+  setPopupOutputText('dev-popup-output-scheduler', formatPopupDebugValue(summary.schedulerReason));
+  setPopupOutputText('dev-popup-output-context', summary.contextMessage);
+
+  const bodyHtml = emptyMessage
+    ? `<p class="popup-output-empty">${escapeHtml(emptyMessage)}</p>`
+    : `<table class="popup-output-table"><thead><tr><th>#</th><th>Not</th><th>Planlanan</th><th>Score / Weight</th><th>Seçim Faktörleri</th><th>Final Probability</th><th>Uygunluk</th><th>Suppression</th></tr></thead><tbody>${rows.map(row => `
+      <tr>
+        <td>${escapeHtml(String(row.order))}</td>
+        <td><strong>${escapeHtml(String(row.title))}</strong><small>ID ${escapeHtml(String(row.id))}</small></td>
+        <td>${escapeHtml(formatPopupOutputTime(row.plannedAt, row.minutesFromNow))}</td>
+        <td>${escapeHtml(formatPopupDebugValue(row.score))}<small>Final weight: ${escapeHtml(formatPopupDebugValue(row.finalWeight))}</small></td>
+        <td class="popup-output-factors"><span>Önem: ${escapeHtml(formatPopupDebugValue(row.importance))}</span><span>Context: ${escapeHtml(formatPopupDebugValue(row.contextMatch))}</span><span>Staleness: ${escapeHtml(formatPopupDebugValue(row.staleness))}</span><span>Deadline: ${escapeHtml(formatPopupDebugValue(row.deadline))}</span><span>Cooldown: ${escapeHtml(formatPopupDebugValue(row.cooldown))}</span></td>
+        <td>${escapeHtml(formatFinalProbability(row))}</td>
+        <td><span class="popup-output-eligibility ${row.eligibility === 'Uygun' ? 'is-eligible' : 'is-unknown'}">${escapeHtml(row.eligibility)}</span></td>
+        <td>${escapeHtml(String(row.suppression))}</td>
+      </tr>`).join('')}</tbody></table>`;
+  const signature = JSON.stringify({ summary, rows, emptyMessage });
+  if (signature === popupOutputLastSignature) return;
+
+  const scrollTop = body.scrollTop;
+  const scrollLeft = body.scrollLeft;
+  body.innerHTML = bodyHtml;
+  body.scrollTop = scrollTop;
+  body.scrollLeft = scrollLeft;
+  popupOutputLastSignature = signature;
+}
+
+function setPopupOutputText(id, value) {
+  const element = document.getElementById(id);
+  if (element && element.textContent !== value) element.textContent = value;
+}
+
+function formatFinalProbability(row) {
+  if (row.probability !== undefined && row.probability !== null && row.probability !== '') {
+    return formatPopupProbability(row.probability);
+  }
+  if (row.probabilityReason) return formatPopupDebugValue(row.probabilityReason);
+  if (row.eligibility === 'Uygun değil') return 'Aday uygun değil';
+  return 'Debug state eksik';
+}
+function getPopupSnapshotScopes(schedulePayload, queuePayload) {
+  return [
+    schedulePayload,
+    schedulePayload?.data,
+    schedulePayload?.schedulerState,
+    schedulePayload?.budget,
+    schedulePayload?.hourlyBudget,
+    schedulePayload?.selectionSettings,
+    schedulePayload?.context,
+    queuePayload,
+    queuePayload?.data,
+    queuePayload?.schedulerState
+  ].filter(Boolean);
+}
+
+function readPopupDebugValue(scopes, keys) {
+  for (const scope of scopes) {
+    if (!scope || typeof scope !== 'object') continue;
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(scope, key) && scope[key] !== undefined && scope[key] !== null && scope[key] !== '') {
+        return scope[key];
+      }
+    }
+  }
+  return undefined;
+}
+
+function getPopupOutputSummary(snapshotScopes) {
+  const used = readPopupDebugValue(snapshotScopes, ['usedPopupCount', 'popupCountThisHour', 'hourlyPopupCount', 'used']);
+  const limit = readPopupDebugValue(snapshotScopes, ['hourlyLimit', 'maxPopupsPerHour', 'maxPopups', 'limit']);
+  const slotIntervalMinutes = readPopupDebugValue(snapshotScopes, ['baseSlotIntervalMinutes', 'slotIntervalMinutes', 'baseIntervalMinutes']);
+  const lastPopupAt = readPopupDebugValue(snapshotScopes, ['lastPopupAt', 'lastShownAt', 'lastPopupTime']);
+  const nextSlotAt = readPopupDebugValue(snapshotScopes, ['nextSlotAt', 'nextScheduledSlotAt', 'scheduledSlotAt']);
+  const nextAllowedAt = readPopupDebugValue(snapshotScopes, ['nextAllowedAt', 'nextEligibleAt']);
+  const schedulerReason = readPopupDebugValue(snapshotScopes, ['scheduleReason', 'timingReason', 'waitingReason', 'schedulerStatus', 'statusReason']) || 'Yayınlanmadı';
+  const trackedApp = readPopupDebugValue(snapshotScopes, ['trackedApplication', 'activeTrackedApplication', 'activeApplication', 'trackedApp']);
+  const contextActive = readPopupDebugValue(snapshotScopes, ['contextActive', 'hasContextMatch', 'isContextActive']);
+  const contextWeight = readPopupDebugValue(snapshotScopes, ['contextWeight', 'contextCandidateWeight', 'contextRatio']);
+  const randomWeight = readPopupDebugValue(snapshotScopes, ['randomWeight', 'randomCandidateWeight', 'randomRatio', 'fallbackWeight']);
+  const hasTrackedApp = Boolean(trackedApp) || contextActive === true;
+  const contextMessage = hasTrackedApp
+    ? `Takip edilen uygulama: ${formatPopupDebugValue(trackedApp || 'eşleşme aktif')}. Context/rastgele ağırlıkları: ${formatPopupProbability(contextWeight)} / ${formatPopupProbability(randomWeight)}.`
+    : (contextActive === false || trackedApp === false
+      ? 'Takip edilen uygulama yok; backend tüm aday havuzunu kullanıyor.'
+      : 'Context durumu snapshotta yayınlanmadı.');
+
+  return { used, limit, slotIntervalMinutes, lastPopupAt, nextSlotAt, nextAllowedAt, schedulerReason, contextMessage };
+}
+
+function formatPopupDebugValue(value) {
+  if (value === undefined || value === null || value === '') return '-';
+  if (typeof value === 'boolean') return value ? 'Evet' : 'Hayır';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+function formatPopupProbability(value) {
+  if (value === undefined || value === null || value === '') return '-';
+  const number = Number(value);
+  if (Number.isFinite(number) && number >= 0 && number <= 1) return `${(number * 100).toFixed(1)}%`;
+  if (Number.isFinite(number) && number >= 0 && number <= 100) return `${number}%`;
+  return formatPopupDebugValue(value);
+}
+
+function formatPopupSlotInterval(value) {
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes) || minutes < 0) return 'Backend yayınlamadı';
+  return `${minutes} dk`;
+}
+
+function formatPopupOutputTime(value, minutesFromNow) {
+  if (Number.isFinite(Number(minutesFromNow))) {
+    const minutes = Number(minutesFromNow);
+    return minutes < 0 ? `${Math.abs(minutes)} dk geçti` : `+${minutes} dk`;
+  }
+  if (!value) return '-';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('tr-TR', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
+}
 async function devSimulateDeadline() {
   const typeSelect = document.getElementById('dev-sim-type');
   const itemSelect = document.getElementById('dev-sim-item');
@@ -3591,6 +3657,15 @@ function setupDebugIPCListeners() {
       const statusEl = document.getElementById('dev-popup-interval-status');
       if (statusEl) {
         statusEl.textContent = `${count} popup tetiklendi`;
+      }
+    });
+  }
+
+  const popupDebugSubscriber = window.electronAPI?.onPopupDebugUpdated || window.electronAPI?.onPopupDebugStateUpdated;
+  if (typeof popupDebugSubscriber === 'function') {
+    popupDebugSubscriber(() => {
+      if (document.getElementById('dev-popup-output-container')) {
+        schedulePopupExitOrderRefresh();
       }
     });
   }
@@ -3936,7 +4011,7 @@ async function loadDashboard() {
       const topCatEl = document.getElementById('dashboard-top-category');
       if (topCatEl) topCatEl.textContent = topCatVal;
 
-      // Render Weekly Progress bar heights based on dismissal logs
+      // Render Weekly Progress from actual completion events.
       const current = new Date();
       const dayOfWeek = current.getDay();
       const distanceToMon = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
@@ -3944,14 +4019,14 @@ async function loadDashboard() {
       startOfWeek.setDate(current.getDate() + distanceToMon);
       startOfWeek.setHours(0, 0, 0, 0);
 
-      const dismissalsThisWeek = await window.electronAPI.dbQuery(`
-        SELECT dismissed_at FROM dismiss_log 
-        WHERE dismissed_at >= ?
-      `, [startOfWeek.toISOString()]);
+      const completedThisWeek = await window.electronAPI.dbQuery(`
+        SELECT last_completed_at FROM tips
+        WHERE last_completed_at IS NOT NULL AND last_completed_at >= ?
+      `, [startOfWeek.getTime()]);
 
       const dayCounts = [0, 0, 0, 0, 0, 0, 0]; // Mon-Sun
-      (dismissalsThisWeek || []).forEach(row => {
-        const d = new Date(row.dismissed_at);
+      (completedThisWeek || []).forEach(row => {
+        const d = new Date(row.last_completed_at);
         let wDay = d.getDay(); // 0 is Sun, 1 is Mon...
         let index = wDay === 0 ? 6 : wDay - 1; // map Mon->0, Sun->6
         if (index >= 0 && index < 7) {
@@ -3959,13 +4034,17 @@ async function loadDashboard() {
         }
       });
 
-      const maxDismiss = Math.max(...dayCounts, 1);
+      const maxCompleted = Math.max(...dayCounts, 1);
       const barsContainer = document.querySelector('.weekly-bar-chart .chart-bars');
       if (barsContainer) {
         barsContainer.innerHTML = '';
+        if (!dayCounts.some(count => count > 0)) {
+          barsContainer.innerHTML = '<p class="chart-empty-state">Bu hafta tamamlanan not yok.</p>';
+          return;
+        }
         const weekdays = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz'];
         dayCounts.forEach((count, i) => {
-          const pct = Math.min((count / maxDismiss) * 100, 100);
+          const pct = count > 0 ? Math.max(8, Math.min((count / maxCompleted) * 100, 100)) : 0;
           
           const col = document.createElement('div');
           col.className = 'chart-bar-col';
@@ -3973,7 +4052,7 @@ async function loadDashboard() {
           const bar = document.createElement('div');
           bar.className = 'chart-bar';
           bar.style.height = `${pct}%`;
-          bar.title = `${count} Erteleme`;
+          bar.title = `${count} Tamamlanan`;
           
           const label = document.createElement('span');
           label.textContent = weekdays[i];
@@ -4381,7 +4460,7 @@ async function saveTipDescription(tipId, description) {
     showToast('Açıklama güncellenemedi.');
   }
 }
-async function updateTipProperty(tipId, propName, value) {
+async function updateTipProperty(tipId, propName, value, { keepDetailOpen = false } = {}) {
   try {
     if (!window.electronAPI || !window.electronAPI.dbRun) return;
     
@@ -4391,6 +4470,11 @@ async function updateTipProperty(tipId, propName, value) {
     const activeTab = openTabs.find(t => t.id === activeTabId);
     if (activeTab) {
       await loadCategoryTabContent(activeTab.categoryId);
+    }
+
+    if (keepDetailOpen) {
+      const dropdown = document.querySelector(`.note-menu-dropdown[data-tip-id="${tipId}"]`);
+      if (dropdown) setNoteMenuOpen(dropdown, true);
     }
   } catch (err) {
     console.error(`Error updating tip property ${propName}:`, err);
