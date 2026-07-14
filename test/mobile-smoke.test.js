@@ -127,14 +127,15 @@ test('istatistik loading, empty ve error state ekranları ayrı render edilir', 
   assert.match(App.renderScreen(route, snapshot, { stats: { status: 'error', error: 'statistics-query-failed' } }), /İstatistikler yüklenemedi/);
 });
 
-test('mobil entrypoint dört alt navigation sekmesi içerir; ayarlar ve aylık istatistik içermez', function () {
+test('mobil entrypoint plan dahil beş alt navigation sekmesi içerir; ayarlar ve aylık istatistik içermez', function () {
   const root = path.resolve(__dirname, '..');
   const html = fs.readFileSync(path.join(root, 'src', 'mobile.html'), 'utf8');
-  assert.equal((html.match(/data-nav=/g) || []).length, 4);
+  assert.equal((html.match(/data-nav=/g) || []).length, 5);
   assert.match(html, /aria-label="Anasayfa"/);
   assert.match(html, /<span>Anasayfa<\/span>/);
   assert.doesNotMatch(html, /aria-label="Bugün"|<span>Bugün<\/span>/);
   assert.match(html, /Notlar/);
+  assert.match(html, /Plan/);
   assert.match(html, /İstatistikler/);
   assert.match(html, /Hesap/);
   assert.doesNotMatch(html, /Ayarlar/);

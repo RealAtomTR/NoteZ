@@ -12,7 +12,7 @@
 
   if (!Domain || !RepositoryModule) throw new Error('Mobil uygulama bağımlılıkları yüklenemedi.');
 
-  const ROUTES = Object.freeze(['today', 'notes', 'stats', 'account', 'subcategory', 'note']);
+  const ROUTES = Object.freeze(['today', 'notes', 'plan', 'stats', 'account', 'subcategory', 'note']);
   const STATUS_LABELS = { active: 'Aktif', paused: 'Duraklatıldı', done: 'Tamamlandı', cancelled: 'İptal edildi', archived: 'Arşivlendi' };
   const MONTHS = ['Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 'Temmuz', 'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık'];
   const DAYS = ['Pazar', 'Pazartesi', 'Salı', 'Çarşamba', 'Perşembe', 'Cuma', 'Cumartesi'];
@@ -35,6 +35,62 @@
     autosave: 'Kaydedildi',
     lastProgress: null
   };
+
+  const PLAN_STORAGE_KEY = 'notez_plan_state_v1';
+  const DEFAULT_PLAN = { goal: 2000, water: 0, date: '', activities: [
+    { title: 'Uyku', start: 23, end: 7, color: '#7b87d8' },
+    { title: 'Spor', start: 15, end: 16, color: '#ee8b55' },
+    { title: 'Öğle yemeği', start: 13, end: 14, color: '#e9c46a' }
+  ] };
+
+  function planState() {
+    const today = new Date().toISOString().slice(0, 10);
+    let saved = null;
+    try { saved = JSON.parse(globalScope.localStorage && globalScope.localStorage.getItem(PLAN_STORAGE_KEY) || 'null'); } catch (error) { saved = null; }
+    const value = Object.assign({}, DEFAULT_PLAN, saved || {});
+    if (value.date !== today) { value.water = 0; value.date = today; }
+    value.goal = Math.max(250, Math.min(10000, Number(value.goal) || 2000));
+    value.water = Math.max(0, Number(value.water) || 0);
+    return value;
+  }
+
+  function savePlan(value) {
+    try { globalScope.localStorage.setItem(PLAN_STORAGE_KEY, JSON.stringify(value)); } catch (error) { /* memory fallback */ }
+  }
+
+  function polarPoint(cx, cy, radius, hour) {
+    const angle = (hour / 24) * Math.PI * 2 - Math.PI / 2;
+    return { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) };
+  }
+
+  function arcPath(cx, cy, radius, start, end) {
+    const a = polarPoint(cx, cy, radius, start);
+    const b = polarPoint(cx, cy, radius, end);
+    const large = ((end - start + 24) % 24) > 12 ? 1 : 0;
+    return 'M ' + a.x.toFixed(2) + ' ' + a.y.toFixed(2) + ' A ' + radius + ' ' + radius + ' 0 ' + large + ' 1 ' + b.x.toFixed(2) + ' ' + b.y.toFixed(2);
+  }
+
+  function planWheel(snapshot, plan) {
+    const notes = (snapshot.notes || []).filter(function timed(note) { return note.status !== 'archived' && note.deadline && String(note.deadline).includes('T'); });
+    const segments = plan.activities.map(function activity(item) {
+      const end = item.end < item.start ? item.end + 24 : item.end;
+      return '<path class="wheel-segment" stroke="' + item.color + '" d="' + arcPath(160, 160, 113, item.start, end) + '" aria-label="' + escapeHtml(item.title) + '"></path>';
+    }).join('');
+    const pins = notes.map(function pin(note) {
+      const date = new Date(note.deadline); const hour = date.getHours() + date.getMinutes() / 60;
+      const a = polarPoint(160, 160, 96, hour); const b = polarPoint(160, 160, 132, hour);
+      return '<line class="wheel-pin" x1="' + a.x.toFixed(2) + '" y1="' + a.y.toFixed(2) + '" x2="' + b.x.toFixed(2) + '" y2="' + b.y.toFixed(2) + '" data-note-id="' + escapeHtml(note.id) + '" aria-label="' + escapeHtml(note.tip) + '"></line>';
+    }).join('');
+    const ticks = Array.from({ length: 24 }, function(_, hour) { const a = polarPoint(160,160,133,hour); const b = polarPoint(160,160,139,hour); const label = polarPoint(160,160,149,hour); return '<line class="wheel-tick" x1="' + a.x.toFixed(2) + '" y1="' + a.y.toFixed(2) + '" x2="' + b.x.toFixed(2) + '" y2="' + b.y.toFixed(2) + '"></line><text class="wheel-label" x="' + label.x.toFixed(2) + '" y="' + label.y.toFixed(2) + '">' + String(hour).padStart(2,'0') + '</text>'; }).join('');
+    const now = new Date(); const nowPoint = polarPoint(160,160,106,now.getHours() + now.getMinutes()/60); const waterMax = plan.goal * 2; const waterRatio = Math.min(1, plan.water / waterMax); const waterPath = arcPath(160,160,82,0,Math.max(.01, waterRatio * 24));
+    return '<svg class="plan-wheel" viewBox="0 0 320 320" role="img" aria-label="24 saatlik günlük plan çarkı"><circle class="wheel-track" cx="160" cy="160" r="113"></circle><path class="wheel-water" d="' + waterPath + '"></path>' + (plan.water > plan.goal ? '<path class="wheel-over" d="' + arcPath(160,160,82,plan.goal / waterMax * 24,Math.max(plan.goal / waterMax * 24 + .01, waterRatio * 24)) + '"></path>' : '') + segments + ticks + pins + '<line class="wheel-now" x1="160" y1="160" x2="' + nowPoint.x.toFixed(2) + '" y2="' + nowPoint.y.toFixed(2) + '"></line></svg><div class="plan-center"><strong>' + escapeHtml((plan.water / 1000).toFixed(1)) + ' L</strong><span>su / ' + escapeHtml((plan.goal / 1000).toFixed(1)) + ' L hedef</span></div>';
+  }
+
+  function renderPlan(snapshot) {
+    const plan = planState(); const waterLimit = plan.goal * 2; const ratio = Math.min(100, plan.water / waterLimit * 100); const over = plan.water > plan.goal;
+    const timedNotes = snapshot.notes.filter(function timed(note) { return note.status !== 'archived' && note.deadline && String(note.deadline).includes('T'); }).sort(function byTime(a,b) { return new Date(a.deadline) - new Date(b.deadline); });
+    return [header('Günün Planı', '24 saatlik çark ve su takibi', true), '<div class="content plan-content">', '<section class="section"><div class="card plan-wheel-card">', planWheel(snapshot, plan), '</div></section>', '<section class="section"><div class="section-head"><h2>Su tüketimi</h2><span class="result-count">maks. ' + (waterLimit / 1000).toFixed(1) + ' L</span></div><div class="card card-pad"><div class="water-summary"><div><strong>' + (plan.water / 1000).toFixed(1) + ' L</strong><p class="note-description">' + (over ? 'Hedef aşıldı; ikinci ölçek aktif.' : 'Günlük hedefe doğru ilerliyorsun.') + '</p></div><div class="plan-controls"><button class="icon-button" type="button" data-action="water-adjust" data-water-delta="-100" aria-label="100 ml azalt">−</button><button class="button teal" type="button" data-action="water-adjust" data-water-delta="100">+100 ml</button><button class="icon-button" type="button" data-action="water-adjust" data-water-delta="100" aria-label="100 ml artır">+</button></div></div><div class="water-progress' + (over ? ' over' : '') + '"><span style="width:' + ratio + '%"></span></div><div class="meta-row"><button class="button ghost" type="button" data-action="water-preset" data-water-value="250">+250 ml</button><button class="button ghost" type="button" data-action="water-preset" data-water-value="500">+500 ml</button><button class="button ghost" type="button" data-action="water-goal">Hedefi değiştir</button></div></div></section>', '<section class="section"><div class="section-head"><h2>Saatli notlar</h2><span class="result-count">' + timedNotes.length + ' işaret</span></div><div class="card card-pad plan-task-list">' + (timedNotes.length ? timedNotes.map(function(note) { const d = new Date(note.deadline); return '<a class="plan-task" href="' + routeHash('note', note.id) + '"><span><strong>' + escapeHtml(note.tip) + '</strong><small>' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + '</small></span><span aria-hidden="true">›</span></a>'; }).join('') : '<p class="note-description">Saat bilgisi olan notlar burada çark üzerinde çizgi olarak görünür.</p>') + '</div></section>', '<section class="section"><div class="section-head"><h2>Plan blokları</h2></div><div class="card card-pad plan-task-list">' + plan.activities.map(function(item) { return '<div class="plan-task"><span><strong>' + escapeHtml(item.title) + '</strong><small>' + String(item.start).padStart(2,'0') + ':00 – ' + String(item.end % 24).padStart(2,'0') + ':00</small></span><span class="badge teal">Blok</span></div>'; }).join('') + '</div></section></div>'].join('');
+  }
 
   function escapeHtml(value) {
     return String(value === undefined || value === null ? '' : value)
@@ -369,6 +425,7 @@
     if (!snapshot) return '<div class="content"><div class="skeleton"></div></div>';
     if (route.name === 'today') return renderToday(snapshot);
     if (route.name === 'notes') return renderNotes(snapshot);
+    if (route.name === 'plan') return renderPlan(snapshot);
     if (route.name === 'subcategory') return renderSubcategory(snapshot, route.id);
     if (route.name === 'note') return renderNoteDetail(snapshot, route.id);
     if (route.name === 'stats') return renderStats(snapshot, renderState && renderState.stats || state.stats);
@@ -516,6 +573,15 @@
     if (action === 'set-today-filter') {
       state.todayFilter = actionTarget.getAttribute('data-filter-value') || 'all';
       return renderCurrentRoute();
+    }
+    if (action === 'water-adjust' || action === 'water-preset') {
+      const plan = planState();
+      const delta = action === 'water-preset' ? Number(actionTarget.getAttribute('data-water-value')) : Number(actionTarget.getAttribute('data-water-delta'));
+      plan.water = Math.max(0, Math.min(plan.goal * 2, plan.water + delta)); plan.date = new Date().toISOString().slice(0, 10); savePlan(plan); return renderCurrentRoute();
+    }
+    if (action === 'water-goal') {
+      const plan = planState(); const value = globalScope.prompt ? globalScope.prompt('Günlük su hedefi (ml)', String(plan.goal)) : null; const goal = Number(value);
+      if (value !== null && Number.isFinite(goal) && goal >= 250) { plan.goal = Math.min(10000, Math.round(goal / 50) * 50); plan.water = Math.min(plan.water, plan.goal * 2); savePlan(plan); return renderCurrentRoute(); }
     }
     if (action === 'clear-filters') {
       state.filters = { search: '', status: 'all', importance: 'all', deadline: 'all' };
