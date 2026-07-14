@@ -1,12 +1,19 @@
 {
   "name": "notez",
   "version": "1.0.0",
-  "description": "Popup Reminder System - Desktop + Android",
+  "description": "NoteZ task and productivity manager",
   "main": "electron/main.js",
   "scripts": {
     "start": "electron .",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "electron-builder"
+    "build": "electron-builder",
+    "mobile:build": "node scripts/build-mobile.js",
+    "mobile:sync": "npm run mobile:build && npx cap sync android",
+    "mobile:check": "node --check src/js/mobile-domain.js && node --check src/js/mobile-repository.js && node --check src/js/mobile.js && node --check scripts/build-mobile.js && node --check scripts/mobile-native-smoke.js",
+    "mobile:test": "node --test test/mobile-*.test.js",
+    "mobile:verify": "npm run mobile:check && npm run mobile:build && npm run mobile:test",
+    "mobile:android:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-mobile-android.ps1",
+    "mobile:native:smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-mobile-native-smoke.ps1"
   },
   "keywords": [
     "electron",
@@ -35,7 +42,6 @@
     "@capacitor/android": "^8.4.0",
     "@capacitor/cli": "^8.4.0",
     "@capacitor/core": "^8.4.0",
-    "@capacitor/local-notifications": "^8.2.0",
     "active-win": "^8.2.1",
     "sql.js": "^1.14.1"
   }

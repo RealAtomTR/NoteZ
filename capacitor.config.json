@@ -1,5 +1,5 @@
 {
   "appId": "com.notez.app",
   "appName": "NoteZ",
-  "webDir": "src"
+  "webDir": ".capacitor/mobile"
 }
