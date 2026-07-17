@@ -1,5 +1,21 @@
 $ErrorActionPreference = 'Stop'
 
+$sdkRoot = if ($env:ANDROID_SDK_ROOT) {
+  $env:ANDROID_SDK_ROOT
+} elseif ($env:ANDROID_HOME) {
+  $env:ANDROID_HOME
+} else {
+  Join-Path $env:LOCALAPPDATA 'Android\Sdk'
+}
+
+if (-not (Test-Path -LiteralPath (Join-Path $sdkRoot 'platform-tools\adb.exe'))) {
+  throw "Android SDK bulunamadı: $sdkRoot"
+}
+
+$env:ANDROID_HOME = $sdkRoot
+$env:ANDROID_SDK_ROOT = $sdkRoot
+Write-Output "Android SDK: $sdkRoot"
+
 npm run mobile:sync
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

@@ -43,6 +43,46 @@
     return year + '-' + month + '-' + day;
   }
 
+  function splitDeadline(value) {
+    if (!value) return { date: '', time: '' };
+    const text = String(value);
+    const localMatch = /^(\d{4}-\d{2}-\d{2})(?:T(\d{2}):(\d{2}))?/.exec(text);
+    if (localMatch && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(text)) {
+      return {
+        date: localMatch[1],
+        time: localMatch[2] ? localMatch[2] + ':' + localMatch[3] : ''
+      };
+    }
+    const parsed = parseLocalDate(text, false);
+    if (!parsed) return { date: '', time: '' };
+    return {
+      date: localDateKey(parsed),
+      time: String(parsed.getHours()).padStart(2, '0') + ':' + String(parsed.getMinutes()).padStart(2, '0')
+    };
+  }
+
+  function combineDeadline(dateValue, timeValue) {
+    const date = String(dateValue || '').trim();
+    const time = String(timeValue || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    if (!time) return date;
+    if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) return date;
+    return date + 'T' + time;
+  }
+
+  function isTimedDeadlineOnDate(value, dateValue) {
+    const parts = splitDeadline(value);
+    if (!parts.date || !parts.time) return false;
+    return parts.date === localDateKey(dateValue instanceof Date ? dateValue : new Date(dateValue || Date.now()));
+  }
+
+  function deadlineHour(value) {
+    const parts = splitDeadline(value);
+    if (!parts.time) return null;
+    const values = parts.time.split(':').map(Number);
+    return values[0] + values[1] / 60;
+  }
+
   function normalizeNote(note) {
     const source = note || {};
     return {
@@ -256,6 +296,10 @@
     buildWeeklyProgress: buildWeeklyProgress,
     buildStatistics: buildStatistics,
     localDateKey: localDateKey,
-    parseLocalDate: parseLocalDate
+    parseLocalDate: parseLocalDate,
+    splitDeadline: splitDeadline,
+    combineDeadline: combineDeadline,
+    isTimedDeadlineOnDate: isTimedDeadlineOnDate,
+    deadlineHour: deadlineHour
   };
 });

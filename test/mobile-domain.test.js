@@ -66,6 +66,17 @@ test('task progress tek source of truth olarak normalize edilir', function () {
   assert.deepEqual(Domain.getTaskProgress([]), { completed: 0, waiting: 0, total: 0, progress: 0 });
 });
 
+test('deadline tarih-only ve yerel tarih+saat olarak kayıpsız ayrılır', function () {
+  assert.deepEqual(Domain.splitDeadline('2026-07-14'), { date: '2026-07-14', time: '' });
+  assert.deepEqual(Domain.splitDeadline('2026-07-14T09:35'), { date: '2026-07-14', time: '09:35' });
+  assert.equal(Domain.combineDeadline('2026-07-14', ''), '2026-07-14');
+  assert.equal(Domain.combineDeadline('2026-07-14', '09:35'), '2026-07-14T09:35');
+  assert.equal(Domain.isTimedDeadlineOnDate('2026-07-14T09:35', new Date(2026, 6, 14, 20, 0)), true);
+  assert.equal(Domain.isTimedDeadlineOnDate('2026-07-14', new Date(2026, 6, 14, 20, 0)), false);
+  assert.equal(Domain.isTimedDeadlineOnDate('2026-07-15T09:35', new Date(2026, 6, 14, 20, 0)), false);
+  assert.equal(Domain.deadlineHour('2026-07-14T09:30'), 9.5);
+});
+
 test('local repository CRUD ve stats ready/empty/error state üretir', async function () {
   const storage = Repository.createMemoryStorage();
   const repo = new Repository.LocalMobileRepository({ storage: storage, storageKey: 'test' });
@@ -84,6 +95,11 @@ test('local repository CRUD ve stats ready/empty/error state üretir', async fun
   assert.equal(updated.status, 'done');
   assert.ok(updated.completed_at);
   assert.equal(updated.description, 'Autosave tamamlandı');
+
+  const timed = repo.createNote({ tip: 'Saatli not', deadline: '2026-07-14T18:45', subcategory_id: targetSubcategory.id });
+  assert.equal(timed.deadline, '2026-07-14T18:45');
+  repo.updateNote(timed.id, { deadline: '2026-07-15' });
+  assert.equal((await repo.getSnapshot()).notes.find(function find(item) { return item.id === timed.id; }).deadline, '2026-07-15');
 
   repo.updateNote(created.id, { status: 'paused' });
   const pausedSnapshot = await repo.getSnapshot();

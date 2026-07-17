@@ -73,6 +73,13 @@ async function main() {
   const client = await connect();
   const { evaluate, send } = client;
 
+  await send('Emulation.setDeviceMetricsOverride', {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 1,
+    mobile: true
+  });
+
   let readyHeading = null;
   for (let attempt = 0; attempt < 50; attempt += 1) {
     readyHeading = await evaluate(`document.querySelector('h1')?.textContent.trim() || null`);
@@ -97,7 +104,7 @@ async function main() {
   assert(initial.heading === 'Anasayfa', 'Anasayfa başlangıç state’i kayboldu.');
   assert(initial.ring === '14%' && initial.percent === '14%' && initial.bar === '14', 'İlerleme kaynakları başlangıçta senkron değil.');
   assert(initial.summary.includes('1/7') && initial.total === '7 görev', 'Başlangıç görev sayıları yanlış.');
-  assert(initial.nav.join('|') === 'Anasayfa|Notlar|İstatistikler|Hesap', 'Alt navigasyon etiketleri yanlış.');
+  assert(initial.nav.join('|') === 'Anasayfa|Notlar|Plan|İstatistikler|Hesap', 'Alt navigasyon etiketleri yanlış.');
   assert(initial.checkboxCount === 7 && initial.nextStepLocked === true, 'Checkbox veya sıralı başlangıç kilidi yanlış.');
   assert(initial.body.includes('Deadline geçti'), 'Geçmiş deadline görünmüyor.');
   assert(initial.body.includes('Ortak · 2 gün kaldı'), 'Ortak deadline görünmüyor.');
@@ -292,12 +299,14 @@ async function main() {
     const title = document.querySelector('#detail-title');
     const description = document.querySelector('#detail-description');
     const importance = document.querySelector('#detail-importance');
-    const deadline = document.querySelector('#detail-deadline');
+    const deadlineDate = document.querySelector('#detail-deadline-date');
+    const deadlineTime = document.querySelector('#detail-deadline-time');
     title.value = 'NativeFabEdited';
     description.value = 'Native detail autosave';
     importance.value = '7';
-    deadline.value = '2026-07-20';
-    [title, description, importance, deadline].forEach((control) => control.dispatchEvent(new Event('input', { bubbles: true })));
+    deadlineDate.value = '2026-07-20';
+    deadlineTime.value = '18:45';
+    [title, description, importance, deadlineDate, deadlineTime].forEach((control) => control.dispatchEvent(new Event('input', { bubbles: true })));
     document.querySelector('[data-importance-target="detail-importance"][data-importance-delta="1"]').click();
   })()`);
   await delay(800);
@@ -309,12 +318,13 @@ async function main() {
     importanceType: document.querySelector('#detail-importance')?.type,
     importanceText: document.querySelector('#detail-importance')?.getAttribute('aria-valuetext'),
     importanceOutput: document.querySelector('[for="detail-importance"][data-importance-output]')?.textContent.trim(),
-    deadline: document.querySelector('#detail-deadline')?.value,
+    deadlineDate: document.querySelector('#detail-deadline-date')?.value,
+    deadlineTime: document.querySelector('#detail-deadline-time')?.value,
     autosave: document.querySelector('#autosave-state')?.textContent.trim()
   }))()`);
   assert(edited.heading === 'Not Detayı' && edited.title === 'NativeFabEdited' && edited.description === 'Native detail autosave', 'Not detay düzenleme akışı yanlış.');
   assert(edited.importance === '8' && edited.importanceType === 'range' && edited.importanceText === '8 / 10' && edited.importanceOutput === '8', 'Not importance slider/stepper state’i yanlış.');
-  assert(edited.deadline === '2026-07-20' && edited.autosave === 'Kaydedildi', 'Not detay autosave alanları kaydedilmedi.');
+  assert(edited.deadlineDate === '2026-07-20' && edited.deadlineTime === '18:45' && edited.autosave === 'Kaydedildi', 'Not detay autosave alanları kaydedilmedi.');
 
   await evaluate(`document.querySelector('[data-action="archive-note"]').click()`);
   await delay(100);
@@ -341,6 +351,150 @@ async function main() {
   const deleted = await evaluate(`({ hash: location.hash, body: document.body.innerText })`);
   assert(deleted.hash === '#/notes' && !deleted.body.includes('NativeDelete'), 'Not silme akışı yanlış.');
 
+  await route('#/today');
+  await evaluate(`document.querySelector('[data-action="new-todo"]').click()`);
+  await delay(100);
+  await evaluate(`(() => {
+    const now = new Date();
+    const date = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, '0'), String(now.getDate()).padStart(2, '0')].join('-');
+    document.querySelector('.bottom-sheet [name="tip"]').value = 'NativeTimed';
+    document.querySelector('.bottom-sheet [name="deadline_date"]').value = date;
+    document.querySelector('.bottom-sheet [name="deadline_time"]').value = '06:30';
+    document.querySelector('.bottom-sheet form').requestSubmit();
+  })()`);
+  await delay(150);
+
+  const planScreen = await route('#/plan');
+  const planInitial = await evaluate(`(() => {
+    const screen = document.querySelector('.screen');
+    const navPlan = document.querySelector('[data-nav="plan"]');
+    const interactive = [...document.querySelectorAll('.water-presets button, .plan-controls button, .water-action-row button, .plan-task button, .section-head button, .bottom-nav a')].filter((item) => item.getClientRects().length);
+    const pin = document.querySelector('.wheel-pin-link');
+    return {
+      heading: document.querySelector('h1')?.textContent.trim(),
+      activeNav: navPlan?.getAttribute('aria-current'),
+      width: innerWidth,
+      height: innerHeight,
+      overflow: screen.scrollWidth - screen.clientWidth,
+      minTouch: Math.min(...interactive.map((item) => Math.min(item.getBoundingClientRect().width, item.getBoundingClientRect().height))),
+      pinCount: document.querySelectorAll('.wheel-pin-link').length,
+      pinHref: pin?.getAttribute('href'),
+      pinLabel: pin?.getAttribute('aria-label')
+    };
+  })()`);
+  assert(planScreen.heading === 'Günün Planı' && planInitial.heading === 'Günün Planı' && planInitial.activeNav === 'page', 'Plan route veya aktif sekme açılmadı.');
+  assert(planInitial.width === 390 && planInitial.height === 844 && planInitial.overflow <= 0, `390x844 Plan viewport taşması: ${JSON.stringify(planInitial)}`);
+  assert(planInitial.minTouch >= 43.9, `Plan dokunma hedefi 44px altında: ${planInitial.minTouch}`);
+  assert(planInitial.pinCount === 1 && /^#\/note\//.test(planInitial.pinHref) && planInitial.pinLabel.includes('NativeTimed'), 'Saatli not pini doğru gün veya route ile oluşmadı.');
+
+  await evaluate(`document.querySelector('.wheel-pin-link').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))`);
+  await delay(100);
+  const pinDetail = await evaluate(`({ hash: location.hash, heading: document.querySelector('h1')?.textContent.trim() })`);
+  assert(pinDetail.heading === 'Not Detayı' && /^#\/note\//.test(pinDetail.hash), 'Pin not detayını açmadı.');
+  await evaluate(`history.back()`);
+  await delay(100);
+  const planBack = await evaluate(`({ hash: location.hash, heading: document.querySelector('h1')?.textContent.trim() })`);
+  assert(planBack.hash === '#/plan' && planBack.heading === 'Günün Planı', 'Pin detayından geri navigasyon Plan ekranına dönmedi.');
+  await evaluate(`history.forward()`);
+  await delay(100);
+  const planForward = await evaluate(`({ hash: location.hash, heading: document.querySelector('h1')?.textContent.trim() })`);
+  assert(/^#\/note\//.test(planForward.hash) && planForward.heading === 'Not Detayı', 'İleri navigasyon not detayını açmadı.');
+  await route('#/plan');
+
+  const planMutationBaseline = await evaluate(`(() => {
+    const screen = document.querySelector('.screen');
+    screen.scrollTop = Math.min(620, screen.scrollHeight - screen.clientHeight);
+    window.__planScreenNode = screen;
+    window.__planContentNode = document.querySelector('.plan-content');
+    return { scrollTop: screen.scrollTop, maxScroll: screen.scrollHeight - screen.clientHeight };
+  })()`);
+  assert(planMutationBaseline.scrollTop > 0 && planMutationBaseline.maxScroll >= planMutationBaseline.scrollTop, 'Plan scroll regresyon testi için kaydırılamadı.');
+
+  await evaluate(`document.querySelector('[data-action="water-goal"]').click()`);
+  await delay(80);
+  await evaluate(`(() => { const goal = document.querySelector('.bottom-sheet [name="goal"]'); goal.value = '500'; goal.closest('form').requestSubmit(); })()`);
+  await delay(80);
+  const goalMutation = await evaluate(`(() => ({
+    scrollTop: document.querySelector('.screen').scrollTop,
+    sameScreen: window.__planScreenNode === document.querySelector('.screen'),
+    sameContent: window.__planContentNode === document.querySelector('.plan-content'),
+    sheetClosed: document.querySelector('.bottom-sheet').hidden
+  }))()`);
+  assert(goalMutation.scrollTop === planMutationBaseline.scrollTop && goalMutation.sameScreen && goalMutation.sameContent && goalMutation.sheetClosed, `Su hedefi değişiminde Plan yeniden render/scroll hatası: ${JSON.stringify(goalMutation)}`);
+  await evaluate(`document.querySelector('[data-action="water-cycle"][data-water-step="1"]').click()`);
+  await delay(60);
+  await evaluate(`document.querySelector('[data-action="water-cycle"][data-water-step="-1"]').click()`);
+  await delay(60);
+  await evaluate(`document.querySelector('[data-action="water-adjust"][data-water-delta="250"]').click()`);
+  await delay(60);
+  await evaluate(`document.querySelector('[data-action="water-select"][data-water-value="500"]').click()`);
+  await delay(60);
+  await evaluate(`document.querySelector('[data-action="water-adjust"][data-water-delta="500"]').click()`);
+  await delay(80);
+  const waterOver = await evaluate(`(() => ({
+    total: document.querySelector('.water-summary strong')?.textContent.trim(),
+    status: document.querySelector('.water-summary .note-description')?.textContent.trim(),
+    selected: document.querySelector('.water-preset[aria-pressed="true"]')?.textContent.trim(),
+    overWidth: document.querySelector('.water-progress.over span')?.style.width,
+    scrollTop: document.querySelector('.screen').scrollTop,
+    sameScreen: window.__planScreenNode === document.querySelector('.screen'),
+    sameContent: window.__planContentNode === document.querySelector('.plan-content'),
+    stored: JSON.parse(localStorage.getItem('notez_plan_state_v2'))
+  }))()`);
+  assert(waterOver.total === '0.75 L' && waterOver.status.includes('ek tüketim ayrı izleniyor') && waterOver.selected === '500 ml', 'Su hedef aşımı veya preset görünümü yanlış.');
+  assert(waterOver.overWidth === '50%' && waterOver.stored.waterMl === 750 && waterOver.stored.goalMl === 500, 'Su hedef üstü ölçeği veya localStorage yanlış.');
+  assert(waterOver.scrollTop === planMutationBaseline.scrollTop && waterOver.sameScreen && waterOver.sameContent, `Su aksiyonları Plan DOM/scroll state'ini bozdu: ${JSON.stringify(waterOver)}`);
+
+  await evaluate(`document.querySelector('[data-action="edit-plan-sleep"]').click()`);
+  await delay(80);
+  await evaluate(`(() => { const form = document.querySelector('.bottom-sheet [data-form="plan-sleep"]'); form.elements.start.value = '22:45'; form.elements.end.value = '06:45'; form.requestSubmit(); })()`);
+  await delay(80);
+  const sleepEdited = await evaluate(`(() => ({
+    updated: document.body.innerText.includes('22:45 – 06:45'),
+    scrollTop: document.querySelector('.screen').scrollTop,
+    sameScreen: window.__planScreenNode === document.querySelector('.screen'),
+    contentReplaced: window.__planContentNode !== document.querySelector('.plan-content')
+  }))()`);
+  assert(sleepEdited.updated, 'Uyku saatleri güncellenmedi.');
+  assert(sleepEdited.scrollTop === planMutationBaseline.scrollTop && sleepEdited.sameScreen && sleepEdited.contentReplaced, `Uyku düzenlemede scroll/ekran state'i korunmadı: ${JSON.stringify(sleepEdited)}`);
+
+  await evaluate(`document.querySelector('[data-action="new-plan-activity"]').click()`);
+  await delay(80);
+  await evaluate(`(() => { const form = document.querySelector('.bottom-sheet [data-form="plan-activity"]'); form.elements.title.value = 'Gece odak'; form.elements.start.value = '23:30'; form.elements.end.value = '01:00'; form.elements.category.value = 'work'; form.requestSubmit(); })()`);
+  await delay(80);
+  const activityAdded = await evaluate(`(() => ({ updated: document.body.innerText.includes('Gece odak') && document.body.innerText.includes('23:30 – 01:00'), scrollTop: document.querySelector('.screen').scrollTop }))()`);
+  assert(activityAdded.updated && activityAdded.scrollTop === planMutationBaseline.scrollTop, `Gece yarısını aşan aktivite veya scroll state'i yanlış: ${JSON.stringify(activityAdded)}`);
+  await evaluate(`(() => { const row = [...document.querySelectorAll('.plan-task')].find((item) => item.textContent.includes('Gece odak')); row.querySelector('[data-action="edit-plan-activity"]').click(); })()`);
+  await delay(80);
+  await evaluate(`(() => { const form = document.querySelector('.bottom-sheet [data-form="plan-activity"]'); form.elements.title.value = 'Gece odak güncel'; form.requestSubmit(); })()`);
+  await delay(80);
+  const activityEdited = await evaluate(`(() => ({ updated: document.body.innerText.includes('Gece odak güncel'), scrollTop: document.querySelector('.screen').scrollTop }))()`);
+  assert(activityEdited.updated && activityEdited.scrollTop === planMutationBaseline.scrollTop, `Aktivite düzenleme veya scroll state'i yanlış: ${JSON.stringify(activityEdited)}`);
+  await evaluate(`(() => { window.confirm = () => true; const row = [...document.querySelectorAll('.plan-task')].find((item) => item.textContent.includes('Gece odak güncel')); row.querySelector('[data-action="edit-plan-activity"]').click(); })()`);
+  await delay(80);
+  await evaluate(`document.querySelector('.bottom-sheet [data-action="delete-plan-activity"]').click()`);
+  await delay(80);
+  const activityDeleted = await evaluate(`(() => ({ updated: !document.body.innerText.includes('Gece odak güncel'), scrollTop: document.querySelector('.screen').scrollTop }))()`);
+  assert(activityDeleted.updated && activityDeleted.scrollTop === planMutationBaseline.scrollTop, `Aktivite silme veya scroll state'i yanlış: ${JSON.stringify(activityDeleted)}`);
+
+  await evaluate(`location.reload()`);
+  let reloadedPlanHeading = null;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    await delay(100);
+    reloadedPlanHeading = await evaluate(`document.querySelector('h1')?.textContent.trim() || null`);
+    if (reloadedPlanHeading === 'Günün Planı') break;
+  }
+  assert(reloadedPlanHeading === 'Günün Planı', 'Yenileme sonrası Plan ekranı hazır olmadı.');
+  const planPersisted = await evaluate(`(() => ({
+    heading: document.querySelector('h1')?.textContent.trim(),
+    total: document.querySelector('.water-summary strong')?.textContent.trim(),
+    selected: document.querySelector('.water-preset[aria-pressed="true"]')?.textContent.trim(),
+    sleep: document.body.innerText.includes('22:45 – 06:45'),
+    overflow: document.querySelector('.screen').scrollWidth - document.querySelector('.screen').clientWidth
+  }))()`);
+  assert(planPersisted.heading === 'Günün Planı' && planPersisted.total === '0.75 L' && planPersisted.selected === '500 ml' && planPersisted.sleep, 'Plan localStorage yenileme sonrası korunmadı.');
+  assert(planPersisted.overflow <= 0, 'Yenileme sonrası Plan ekranında yatay taşma oluştu.');
+
   const forbidden = await evaluate(`(() => {
     const sources = [document.documentElement.innerHTML.toLocaleLowerCase('tr-TR')];
     return ['popup', 'wordle', 'satranç', 'snooze', 'hold to dismiss', 'ayarlar', 'ses sistemi'].filter((term) => sources.some((source) => source.includes(term)));
@@ -355,9 +509,14 @@ async function main() {
     completionAnimation: { forward: true, reverse: true },
     sequentialUnlocked: true,
     filters,
-    navigation: [notes.heading, stats.heading, account.heading],
+    navigation: [notes.heading, planInitial.heading, stats.heading, account.heading],
     noteFilters,
     safeArea,
+    planViewport: { width: planInitial.width, height: planInitial.height, overflow: planInitial.overflow, minTouch: planInitial.minTouch },
+    planNavigation: { pinDetail: true, back: true, forward: true },
+    planEditing: { sleep: sleepEdited.updated, activityAdded: activityAdded.updated, activityEdited: activityEdited.updated, activityDeleted: activityDeleted.updated },
+    planScrollPreserved: { water: waterOver.scrollTop, planContent: activityDeleted.scrollTop },
+    water: { persisted: true, targetOverflow: true, selectedPreset: waterOver.selected },
     todoTargets: ['NativeSmoke', 'NativeFab'],
     noteCrud: { edited: true, archived: true, deleted: true }
   }, null, 2));

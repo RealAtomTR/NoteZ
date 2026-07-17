@@ -9,25 +9,36 @@
   <link rel="stylesheet" href="styles/mobile.css">
 </head>
 <body>
+  <svg class="icon-sprite" width="0" height="0" aria-hidden="true" focusable="false">
+    <symbol id="icon-home" viewBox="0 0 24 24"><path d="m3 11 9-9 9 9"></path><path d="M5 10v10a2 2 0 0 0 2 2h3v-7h4v7h3a2 2 0 0 0 2-2V10"></path></symbol>
+    <symbol id="icon-file-text" viewBox="0 0 24 24"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5Z"></path><path d="M14 2v6h6M8 13h8M8 17h8M8 9h2"></path></symbol>
+    <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></symbol>
+    <symbol id="icon-chart" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"></path></symbol>
+    <symbol id="icon-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"></circle><path d="M4.5 21a7.5 7.5 0 0 1 15 0"></path></symbol>
+    <symbol id="icon-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="m8 12 2.5 2.5L16 9"></path></symbol>
+    <symbol id="icon-pause-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M10 9v6M14 9v6"></path></symbol>
+    <symbol id="icon-calendar-clock" viewBox="0 0 24 24"><path d="M16 2v4M8 2v4M3 9h18M5 4h14a2 2 0 0 1 2 2v5.5M14.5 20H5a2 2 0 0 1-2-2V6"></path><circle cx="17" cy="17" r="4"></circle><path d="M17 15v2l1.25.75"></path></symbol>
+    <symbol id="icon-activity" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"></path></symbol>
+  </svg>
   <a class="skip-link" href="#screen">İçeriğe geç</a>
   <div id="mobile-shell" class="mobile-shell">
     <main id="screen" class="screen" tabindex="-1" aria-live="polite"></main>
 
     <nav id="bottom-nav" class="bottom-nav" aria-label="Alt navigasyon">
       <a href="#/today" data-nav="today" aria-label="Anasayfa">
-        <span class="nav-icon" aria-hidden="true">⌂</span><span>Anasayfa</span>
+        <svg class="nav-icon" viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" focusable="false"><use href="#icon-home"></use></svg><span class="nav-label">Anasayfa</span>
       </a>
       <a href="#/notes" data-nav="notes" aria-label="Notlar">
-        <span class="nav-icon" aria-hidden="true">▤</span><span>Notlar</span>
+        <svg class="nav-icon" viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" focusable="false"><use href="#icon-file-text"></use></svg><span class="nav-label">Notlar</span>
       </a>
       <a href="#/plan" data-nav="plan" aria-label="Plan">
-        <span class="nav-icon" aria-hidden="true">◷</span><span>Plan</span>
+        <svg class="nav-icon" viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" focusable="false"><use href="#icon-clock"></use></svg><span class="nav-label">Plan</span>
       </a>
       <a href="#/stats" data-nav="stats" aria-label="İstatistikler">
-        <span class="nav-icon" aria-hidden="true">▥</span><span>İstatistikler</span>
+        <svg class="nav-icon" viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" focusable="false"><use href="#icon-chart"></use></svg><span class="nav-label">İstatistikler</span>
       </a>
       <a href="#/account" data-nav="account" aria-label="Hesap">
-        <span class="nav-icon" aria-hidden="true">○</span><span>Hesap</span>
+        <svg class="nav-icon" viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" focusable="false"><use href="#icon-user"></use></svg><span class="nav-label">Hesap</span>
       </a>
     </nav>
   </div>
