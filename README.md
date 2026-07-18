@@ -1,33 +1,31 @@
-# NoteZ
+# NoteZ Mobile
 
-NoteZ is a desktop-first reminder and task assistant built with Electron. It helps users capture tasks quickly, organize them into categories, and surface the right reminders at the right time. The current focus is on the Windows desktop experience, with mobile support planned later.
+NoteZ Mobile is the mobile task and planning experience for NoteZ. This branch contains only the Capacitor mobile application; the Electron desktop application is developed separately.
 
-## What NoteZ does
+## Features
 
-- Captures tasks with quick input so adding a task takes only a couple of seconds.
-- Organizes work into categories, subcategories, and notes.
-- Uses popup reminders, countdown flows, and status actions to keep tasks visible.
-- Supports local-first storage, with task data mirrored into Markdown files for portability and future import/export workflows.
-- Includes debugging and developer visibility tools for popup scheduling, queue state, window tracking, and check-in flows.
+- Daily task and category views
+- Plan wheel with time-based notes and activities
+- Sleep, activity, and water tracking
+- Weekly statistics and account screens
+- Local persistence through the mobile repository layer
 
-## Main areas
+## Browser development
 
-- **Desktop UI**: task lists, detail panels, filters, stats, and popup controls.
-- **Electron backend**: reminder scheduling, popup rules, window tracking, and database synchronization.
-- **Markdown storage**: local files used for notes, categories, and future interoperability.
-- **Debug tools**: panel controls and runtime visibility for troubleshooting popup and check-in behavior.
-
-## Project goals
-
-- Keep the app local-first.
-- Make task capture fast and low-friction.
-- Avoid popup spam while still keeping tasks visible.
-- Preserve a clean separation between UI and backend responsibilities.
-- Support future workflows like Obsidian-style linking, import/export, and analytics.
-
-## Run
-
-```bash
+```powershell
 npm install
-npm start
+npm run mobile:verify
+npm run mobile:build
+python -m http.server 4173 --directory .capacitor/mobile
 ```
+
+Open `http://localhost:4173` in a browser.
+
+## Android development
+
+```powershell
+npm run mobile:sync
+npm run mobile:android:build
+```
+
+Desktop Electron source and desktop-only dependencies are intentionally not part of this branch.
